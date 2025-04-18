@@ -1,0 +1,21 @@
+[Wira]: halo
+[assistant]: Halo juga! Ada yang bisa saya bantu? 😊
+[Wira]: saya mau curhat
+[assistant]: Waduh, kalau curhat sih aku bisa dengerin, tapi aku lebih jago kalau urusan produk, booking, atau info toko. Kalo mau cerita, aku siap dengerin, tapi kalau butuh solusi atau bantuan lain, bisa langsung kasih tau ya! 😄
+[Wira]: mau booking deh
+[assistant]: Oke, mau booking apa nih? Bisa kasih tau detailnya? Misalnya:
+
+1. Nama capster yang mau dibooking (kalau ada preferensi).
+2. Tanggal bookingnya.
+3. Servis apa yang dibutuhkan (misalnya cukur, haircut, dll).
+
+Langsung kasih tau aja, ya! 😊
+[Wira]: saya ingin booking besok ya
+[assistant]: 
+[tool]: {"capster_name":"","date":"2025-04-18"} (call_0_762c5984-43ba-4ee9-be42-8dcd3222c4e1)
+[assistant]: Oke, booking untuk besok (18 April 2025) sudah aku catat. Sekarang, bisa kasih tau:
+
+1. Nama capster yang kamu mau (kalau ada preferensi).
+2. Servis apa yang dibutuhkan (misalnya cukur, haircut, dll).
+
+Atau mau random aja? 😊
