@@ -2,11 +2,11 @@ package main
 
 import (
 	"context"
-	cs_ai "git.aksaratech.com/aksaratech/project/aksara-ai"
-	"git.aksaratech.com/aksaratech/project/aksara-ai/example/intents"
-	"git.aksaratech.com/aksaratech/project/aksara-ai/model"
 	"github.com/go-redis/redis/v8"
 	"github.com/labstack/echo/v4"
+	cs_ai "pkg.aksaratech.cloud/go-super-ai"
+	"pkg.aksaratech.cloud/go-super-ai/example/intents"
+	"pkg.aksaratech.cloud/go-super-ai/model"
 )
 
 const (
