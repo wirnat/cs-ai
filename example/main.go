@@ -4,9 +4,9 @@ import (
 	"context"
 	"github.com/go-redis/redis/v8"
 	"github.com/labstack/echo/v4"
-	cs_ai "pkg.aksaratech.cloud/go-super-ai"
-	"pkg.aksaratech.cloud/go-super-ai/example/intents"
-	"pkg.aksaratech.cloud/go-super-ai/model"
+	cs_ai "github.com/wirnat/cs-ai"
+	"github.com/wirnat/cs-ai/example/intents"
+	"github.com/wirnat/cs-ai/model"
 )
 
 const (

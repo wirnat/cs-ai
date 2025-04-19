@@ -1,4 +1,4 @@
-module pkg.aksaratech.cloud/go-super-ai
+module github.com/wirnat/cs-ai
 
 go 1.23.2
 
