@@ -1,12 +1,14 @@
 package intents
 
+import "context"
+
 type ProductCatalog struct{}
 
 func (p ProductCatalog) Param() interface{} {
 	return nil
 }
 
-func (p ProductCatalog) Handle(i map[string]interface{}) (interface{}, error) {
+func (p ProductCatalog) Handle(ctx context.Context, i map[string]interface{}) (interface{}, error) {
 	return []map[string]interface{}{
 		{
 			"service":     "Hairnerd Pomade",

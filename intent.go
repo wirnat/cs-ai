@@ -1,8 +1,10 @@
 package cs_ai
 
+import "context"
+
 type Intent interface {
 	Code() string
-	Handle(map[string]interface{}) (interface{}, error)
+	Handle(ctx context.Context, req map[string]interface{}) (interface{}, error)
 	Description() []string
 	Param() interface{}
 }

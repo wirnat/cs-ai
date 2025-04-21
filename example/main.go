@@ -50,7 +50,7 @@ func main() {
 			"pelanggan yg menghubungi bernama " + userMessage.ParticipantName,
 		}
 
-		message1, err2 := csAI.Exec(userMessage.ParticipantName, userMessage, systemMessage...)
+		message1, err2 := csAI.Exec(ctx.Request().Context(), userMessage.ParticipantName, userMessage, systemMessage...)
 		if err2 != nil {
 			return err2
 		}

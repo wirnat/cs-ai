@@ -1,5 +1,7 @@
 package intents
 
+import "context"
+
 type StockProduct struct{}
 
 func (s StockProduct) Description() []string {
@@ -16,7 +18,7 @@ func (s StockProduct) Code() string {
 	return "get-stock"
 }
 
-func (s StockProduct) Handle(i map[string]interface{}) (interface{}, error) {
+func (s StockProduct) Handle(ctx context.Context, i map[string]interface{}) (interface{}, error) {
 	return ItemR{
 		Name:  i["name"].(string),
 		Stock: 10,

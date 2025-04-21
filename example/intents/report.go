@@ -1,5 +1,7 @@
 package intents
 
+import "context"
+
 type Report struct {
 }
 
@@ -7,7 +9,7 @@ func (r Report) Code() string {
 	return "report"
 }
 
-func (r Report) Handle(m map[string]interface{}) (interface{}, error) {
+func (r Report) Handle(ctx context.Context, m map[string]interface{}) (interface{}, error) {
 	return map[string]interface{}{
 		"date":  "2023-10-01",
 		"net":   2000,

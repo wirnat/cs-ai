@@ -1,12 +1,14 @@
 package intents
 
+import "context"
+
 type BookingCapster struct{}
 
 func (b BookingCapster) Code() string {
 	return "booking-capster"
 }
 
-func (b BookingCapster) Handle(m map[string]interface{}) (interface{}, error) {
+func (b BookingCapster) Handle(ctx context.Context, m map[string]interface{}) (interface{}, error) {
 	capsterName, _ := m["capster_name"].(string)
 	date, _ := m["date"].(string)
 

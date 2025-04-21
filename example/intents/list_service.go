@@ -1,12 +1,14 @@
 package intents
 
+import "context"
+
 type ListService struct{}
 
 func (l ListService) Code() string {
 	return "list-service"
 }
 
-func (l ListService) Handle(m map[string]interface{}) (interface{}, error) {
+func (l ListService) Handle(ctx context.Context, m map[string]interface{}) (interface{}, error) {
 	return []map[string]interface{}{
 		{
 			"service":     "Haircut Adult",

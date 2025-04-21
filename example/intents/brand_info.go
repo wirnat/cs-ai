@@ -1,5 +1,7 @@
 package intents
 
+import "context"
+
 type BrandInfo struct {
 }
 
@@ -12,7 +14,7 @@ type Outlet struct {
 	Address string `json:"address"`
 }
 
-func (b BrandInfo) Handle(i map[string]interface{}) (interface{}, error) {
+func (b BrandInfo) Handle(ctx context.Context, i map[string]interface{}) (interface{}, error) {
 	return Outlet{
 		Address: "Jl. Kenyeri 2, Gang D, No.4",
 		Name:    "Ms Man",

@@ -13,8 +13,8 @@ import (
 	"time"
 )
 
-func New(ApiKey string, modeler Modeler, o ...Options) *csAI {
-	cs := &csAI{
+func New(ApiKey string, modeler Modeler, o ...Options) *CsAI {
+	cs := &CsAI{
 		ApiKey: ApiKey,
 		Model:  modeler,
 	}
@@ -24,7 +24,7 @@ func New(ApiKey string, modeler Modeler, o ...Options) *csAI {
 	return cs
 }
 
-type csAI struct {
+type CsAI struct {
 	ApiKey  string
 	Model   Modeler
 	intents []Intent
@@ -40,7 +40,7 @@ type AIResponse struct {
 }
 
 // Exec mengeksekusi pesan ke AI
-func (c *csAI) Exec(sessionID string, userMessage UserMessage, additionalSystemMessage ...string) (Message, error) {
+func (c *CsAI) Exec(ctx context.Context, sessionID string, userMessage UserMessage, additionalSystemMessage ...string) (Message, error) {
 	// ambil pesan lama (jika ada)
 	oldMessages, _ := c.getSessionMessages(sessionID) // error bisa diabaikan
 	messages := make(Messages, 0)
@@ -110,7 +110,7 @@ func (c *csAI) Exec(sessionID string, userMessage UserMessage, additionalSystemM
 						return Message{}, fmt.Errorf("invalid function argument format")
 					}
 
-					data, err := intent.Handle(paramMap)
+					data, err := intent.Handle(ctx, paramMap)
 					if err != nil {
 						return Message{}, err
 					}
@@ -154,7 +154,7 @@ func (c *csAI) Exec(sessionID string, userMessage UserMessage, additionalSystemM
 }
 
 // Report melaporkan sesi chat ketika terjadi percakapan diluar konteks
-func (c *csAI) Report(sessionID string) error {
+func (c *CsAI) Report(sessionID string) error {
 	m := c.getModelMessage()
 	sm, err := c.getSessionMessages(sessionID)
 	if err != nil {
@@ -164,7 +164,7 @@ func (c *csAI) Report(sessionID string) error {
 	return writeMessagesToLog(sessionID, "ai/report", m)
 }
 
-func (c *csAI) Send(messages Messages, additionalSystemMessage ...string) (content Message, err error) {
+func (c *CsAI) Send(messages Messages, additionalSystemMessage ...string) (content Message, err error) {
 	// messages dari setup model
 	systemMessage := c.getModelMessage(additionalSystemMessage...)
 
@@ -236,14 +236,14 @@ func (c *csAI) Send(messages Messages, additionalSystemMessage ...string) (conte
 	return content, nil
 }
 
-func (c *csAI) Add(h Intent) {
+func (c *CsAI) Add(h Intent) {
 	//jika intent tidak pernah ditambahkan lakukan append ke c.intents
 	if !c.containsIntent(h) {
 		c.intents = append(c.intents, h)
 	}
 }
 
-func (c *csAI) containsIntent(i Intent) bool {
+func (c *CsAI) containsIntent(i Intent) bool {
 	for _, intent := range c.intents {
 		if intent.Code() == i.Code() {
 			return true
@@ -252,7 +252,7 @@ func (c *csAI) containsIntent(i Intent) bool {
 	return false
 }
 
-func (c *csAI) getModelMessage(additionalSystemMessage ...string) (m Messages) {
+func (c *CsAI) getModelMessage(additionalSystemMessage ...string) (m Messages) {
 	m = make(Messages, 0)
 
 	for _, s := range c.Model.Train() {
@@ -280,7 +280,7 @@ func (c *csAI) getModelMessage(additionalSystemMessage ...string) (m Messages) {
 	return
 }
 
-func (c *csAI) getSessionMessages(sessionID string) (ms []Message, err error) {
+func (c *CsAI) getSessionMessages(sessionID string) (ms []Message, err error) {
 	if c.options.Redis == nil || sessionID == "" {
 		return
 	}
@@ -305,7 +305,7 @@ func (c *csAI) getSessionMessages(sessionID string) (ms []Message, err error) {
 	return
 }
 
-func (c *csAI) saveSessionMessages(sessionID string, m []Message) ([]Message, error) {
+func (c *CsAI) saveSessionMessages(sessionID string, m []Message) ([]Message, error) {
 	if c.options.Redis == nil || sessionID == "" {
 		return m, nil
 	}

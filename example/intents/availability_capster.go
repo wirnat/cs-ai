@@ -1,6 +1,9 @@
 package intents
 
-import "fmt"
+import (
+	"context"
+	"fmt"
+)
 
 type AvailabilityCapster struct {
 }
@@ -9,7 +12,7 @@ func (a AvailabilityCapster) Code() string {
 	return "capster-availability"
 }
 
-func (a AvailabilityCapster) Handle(m map[string]interface{}) (interface{}, error) {
+func (a AvailabilityCapster) Handle(ctx context.Context, m map[string]interface{}) (interface{}, error) {
 	date := m["date"].(string)
 	return []map[string]interface{}{
 		{
