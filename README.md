@@ -2,8 +2,8 @@
 
 [![Go Version](https://img.shields.io/badge/Go-1.19+-blue.svg)](https://golang.org)
 [![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
-[![Build Status](https://img.shields.io/badge/Build-Passing-brightgreen.svg)](https://github.com/yourusername/cs-ai)
-[![Coverage](https://img.shields.io/badge/Coverage-95%25-brightgreen.svg)](https://github.com/yourusername/cs-ai)
+[![Build Status](https://img.shields.io/badge/Build-Passing-brightgreen.svg)](https://github.com/wirnat/cs-ai)
+[![Coverage](https://img.shields.io/badge/Coverage-95%25-brightgreen.svg)](https://github.com/wirnat/cs-ai)
 
 A powerful, middleware-driven Customer Service AI framework built in Go that provides intelligent conversation handling, tool execution, and learning capabilities.
 
@@ -25,7 +25,7 @@ A powerful, middleware-driven Customer Service AI framework built in Go that pro
 ### Installation
 
 ```bash
-go get github.com/yourusername/cs-ai
+go get github.com/wirnat/cs-ai
 ```
 
 ### Basic Usage
@@ -39,7 +39,7 @@ import (
     "log"
     
     "github.com/go-redis/redis/v8"
-    "github.com/yourusername/cs-ai"
+    "github.com/wirnat/cs-ai"
 )
 
 func main() {
@@ -378,7 +378,7 @@ We welcome contributions! Please follow these steps:
 
 ```bash
 # Clone the repository
-git clone https://github.com/yourusername/cs-ai.git
+git clone https://github.com/wirnat/cs-ai.git
 cd cs-ai
 
 # Install dependencies
@@ -417,5 +417,5 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 ---
 
 <div align="center">
-Made with ❤️ by <a href="https://github.com/yourusername">Wiranatha</a>
+Made with ❤️ by <a href="https://github.com/wirnat">Wiranatha</a>
 </div>
