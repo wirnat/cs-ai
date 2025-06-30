@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -14,6 +15,135 @@ import (
 
 	"github.com/go-redis/redis/v8"
 )
+
+// ============================== MIDDLEWARE SYSTEM ==============================
+
+// MiddlewareContext contains context information for middleware execution
+type MiddlewareContext struct {
+	SessionID       string                 `json:"session_id"`
+	IntentCode      string                 `json:"intent_code"`
+	UserMessage     UserMessage            `json:"user_message"`
+	Parameters      map[string]interface{} `json:"parameters"`
+	StartTime       time.Time              `json:"start_time"`
+	Metadata        map[string]interface{} `json:"metadata"`
+	PreviousResults []interface{}          `json:"previous_results"`
+}
+
+// MiddlewareNext defines the function signature for next middleware in chain
+type MiddlewareNext func(ctx context.Context, mctx *MiddlewareContext) (interface{}, error)
+
+// Middleware interface for intent middleware
+type Middleware interface {
+	Handle(ctx context.Context, mctx *MiddlewareContext, next MiddlewareNext) (interface{}, error)
+	Name() string        // Name of the middleware for logging/debugging
+	AppliesTo() []string // Intent codes this middleware applies to (empty = global)
+	Priority() int       // Priority for ordering (lower = earlier execution)
+}
+
+// MiddlewareFunc is a function-based middleware implementation
+type MiddlewareFunc struct {
+	name      string
+	appliesTo []string
+	priority  int
+	handler   func(ctx context.Context, mctx *MiddlewareContext, next MiddlewareNext) (interface{}, error)
+}
+
+func (m *MiddlewareFunc) Handle(ctx context.Context, mctx *MiddlewareContext, next MiddlewareNext) (interface{}, error) {
+	return m.handler(ctx, mctx, next)
+}
+
+func (m *MiddlewareFunc) Name() string {
+	return m.name
+}
+
+func (m *MiddlewareFunc) AppliesTo() []string {
+	return m.appliesTo
+}
+
+func (m *MiddlewareFunc) Priority() int {
+	return m.priority
+}
+
+// NewMiddlewareFunc creates a new function-based middleware
+func NewMiddlewareFunc(name string, appliesTo []string, priority int, handler func(ctx context.Context, mctx *MiddlewareContext, next MiddlewareNext) (interface{}, error)) *MiddlewareFunc {
+	return &MiddlewareFunc{
+		name:      name,
+		appliesTo: appliesTo,
+		priority:  priority,
+		handler:   handler,
+	}
+}
+
+// MiddlewareChain manages and executes middleware chain
+type MiddlewareChain struct {
+	middlewares []Middleware
+}
+
+// NewMiddlewareChain creates a new middleware chain
+func NewMiddlewareChain() *MiddlewareChain {
+	return &MiddlewareChain{
+		middlewares: make([]Middleware, 0),
+	}
+}
+
+// Add adds a middleware to the chain
+func (mc *MiddlewareChain) Add(middleware Middleware) {
+	mc.middlewares = append(mc.middlewares, middleware)
+	// Sort by priority (lower priority executes first)
+	for i := len(mc.middlewares) - 1; i > 0; i-- {
+		if mc.middlewares[i].Priority() < mc.middlewares[i-1].Priority() {
+			mc.middlewares[i], mc.middlewares[i-1] = mc.middlewares[i-1], mc.middlewares[i]
+		} else {
+			break
+		}
+	}
+}
+
+// Execute executes the middleware chain for a specific intent
+func (mc *MiddlewareChain) Execute(ctx context.Context, mctx *MiddlewareContext, finalHandler MiddlewareNext) (interface{}, error) {
+	// Filter middlewares that apply to this intent
+	applicableMiddlewares := make([]Middleware, 0)
+	for _, middleware := range mc.middlewares {
+		appliesTo := middleware.AppliesTo()
+		if len(appliesTo) == 0 || containsString(appliesTo, mctx.IntentCode) {
+			applicableMiddlewares = append(applicableMiddlewares, middleware)
+		}
+	}
+
+	// If no middlewares, execute final handler directly
+	if len(applicableMiddlewares) == 0 {
+		return finalHandler(ctx, mctx)
+	}
+
+	// Build the chain recursively
+	return mc.buildChain(ctx, mctx, applicableMiddlewares, 0, finalHandler)
+}
+
+// buildChain builds the middleware chain recursively
+func (mc *MiddlewareChain) buildChain(ctx context.Context, mctx *MiddlewareContext, middlewares []Middleware, index int, finalHandler MiddlewareNext) (interface{}, error) {
+	if index >= len(middlewares) {
+		return finalHandler(ctx, mctx)
+	}
+
+	currentMiddleware := middlewares[index]
+	next := func(ctx context.Context, mctx *MiddlewareContext) (interface{}, error) {
+		return mc.buildChain(ctx, mctx, middlewares, index+1, finalHandler)
+	}
+
+	return currentMiddleware.Handle(ctx, mctx, next)
+}
+
+// containsString checks if a string slice contains a specific string
+func containsString(slice []string, item string) bool {
+	for _, s := range slice {
+		if s == item {
+			return true
+		}
+	}
+	return false
+}
+
+// ============================== END MIDDLEWARE SYSTEM ==============================
 
 type Options struct {
 	Redis          *redis.Client //Cache Messages
@@ -25,8 +155,9 @@ type Options struct {
 
 func New(ApiKey string, modeler Modeler, o ...Options) *CsAI {
 	cs := &CsAI{
-		ApiKey: ApiKey,
-		Model:  modeler,
+		ApiKey:          ApiKey,
+		Model:           modeler,
+		middlewareChain: NewMiddlewareChain(),
 	}
 	if len(o) > 0 {
 		cs.options = o[0]
@@ -43,6 +174,7 @@ type CsAI struct {
 	intents         []Intent
 	options         Options
 	learningManager *LearningManager
+	middlewareChain *MiddlewareChain
 }
 
 type UserMessage struct {
@@ -309,7 +441,23 @@ func (c *CsAI) Exec(ctx context.Context, sessionID string, userMessage UserMessa
 						return Message{}, fmt.Errorf("invalid function argument format")
 					}
 
-					data, err := intent.Handle(ctx, paramMap)
+					// Create middleware context
+					middlewareCtx := &MiddlewareContext{
+						SessionID:       sessionID,
+						IntentCode:      intent.Code(),
+						UserMessage:     userMessage,
+						Parameters:      paramMap,
+						StartTime:       time.Now(),
+						Metadata:        make(map[string]interface{}),
+						PreviousResults: make([]interface{}, 0),
+					}
+
+					// Execute middleware chain with intent handler as final handler
+					finalHandler := func(ctx context.Context, mctx *MiddlewareContext) (interface{}, error) {
+						return intent.Handle(ctx, mctx.Parameters)
+					}
+
+					data, err := c.middlewareChain.Execute(ctx, middlewareCtx, finalHandler)
 					if err != nil {
 						return Message{}, err
 					}
@@ -544,6 +692,137 @@ func (c *CsAI) Add(h Intent) {
 	if !c.containsIntent(h) {
 		c.intents = append(c.intents, h)
 	}
+}
+
+// AddMiddleware adds a middleware to the chain
+func (c *CsAI) AddMiddleware(middleware Middleware) {
+	c.middlewareChain.Add(middleware)
+}
+
+// AddMiddlewareFunc adds a function-based middleware to the chain
+func (c *CsAI) AddMiddlewareFunc(name string, appliesTo []string, priority int, handler func(ctx context.Context, mctx *MiddlewareContext, next MiddlewareNext) (interface{}, error)) {
+	middleware := NewMiddlewareFunc(name, appliesTo, priority, handler)
+	c.middlewareChain.Add(middleware)
+}
+
+// AddGlobalMiddleware adds a global middleware that applies to all intents
+func (c *CsAI) AddGlobalMiddleware(name string, priority int, handler func(ctx context.Context, mctx *MiddlewareContext, next MiddlewareNext) (interface{}, error)) {
+	middleware := NewMiddlewareFunc(name, []string{}, priority, handler)
+	c.middlewareChain.Add(middleware)
+}
+
+// Adds adds multiple intents with a shared middleware
+func (c *CsAI) Adds(intents []Intent, middleware Middleware) {
+	// Add all intents first
+	for _, intent := range intents {
+		c.Add(intent)
+	}
+
+	// Add middleware that applies to these intents
+	c.middlewareChain.Add(middleware)
+}
+
+// AddsWithMiddleware adds multiple intents with multiple middlewares
+func (c *CsAI) AddsWithMiddleware(intents []Intent, middlewares []Middleware) {
+	// Add all intents first
+	for _, intent := range intents {
+		c.Add(intent)
+	}
+
+	// Add all middlewares
+	for _, middleware := range middlewares {
+		c.middlewareChain.Add(middleware)
+	}
+}
+
+// AddsWithFunc adds multiple intents with a function-based middleware
+func (c *CsAI) AddsWithFunc(intents []Intent, middlewareName string, priority int, handler func(ctx context.Context, mctx *MiddlewareContext, next MiddlewareNext) (interface{}, error)) {
+	// Extract intent codes
+	intentCodes := make([]string, len(intents))
+	for i, intent := range intents {
+		intentCodes[i] = intent.Code()
+		c.Add(intent)
+	}
+
+	// Create middleware that applies to these specific intents
+	middleware := NewMiddlewareFunc(middlewareName, intentCodes, priority, handler)
+	c.middlewareChain.Add(middleware)
+}
+
+// AddMiddlewareToIntents adds a middleware to specific intent codes
+func (c *CsAI) AddMiddlewareToIntents(intentCodes []string, middleware Middleware) {
+	// Create a new middleware that only applies to these intent codes
+	specificMiddleware := &MiddlewareFunc{
+		name:      middleware.Name() + "_specific",
+		appliesTo: intentCodes,
+		priority:  middleware.Priority(),
+		handler: func(ctx context.Context, mctx *MiddlewareContext, next MiddlewareNext) (interface{}, error) {
+			return middleware.Handle(ctx, mctx, next)
+		},
+	}
+	c.middlewareChain.Add(specificMiddleware)
+}
+
+// AddMiddlewareFuncToIntents adds a function-based middleware to specific intent codes
+func (c *CsAI) AddMiddlewareFuncToIntents(intentCodes []string, middlewareName string, priority int, handler func(ctx context.Context, mctx *MiddlewareContext, next MiddlewareNext) (interface{}, error)) {
+	middleware := NewMiddlewareFunc(middlewareName, intentCodes, priority, handler)
+	c.middlewareChain.Add(middleware)
+}
+
+// AddWithAuth adds multiple intents with authentication middleware
+func (c *CsAI) AddWithAuth(intents []Intent, requiredRole string) {
+	// Add all intents
+	intentCodes := make([]string, len(intents))
+	for i, intent := range intents {
+		intentCodes[i] = intent.Code()
+		c.Add(intent)
+	}
+
+	// Add authentication middleware for these intents
+	authMiddleware := NewAuthenticationMiddleware(requiredRole)
+	c.AddMiddlewareToIntents(intentCodes, authMiddleware)
+}
+
+// AddWithRateLimit adds multiple intents with rate limiting
+func (c *CsAI) AddWithRateLimit(intents []Intent, maxRequests int, timeWindow time.Duration) {
+	// Add all intents
+	intentCodes := make([]string, len(intents))
+	for i, intent := range intents {
+		intentCodes[i] = intent.Code()
+		c.Add(intent)
+	}
+
+	// Add rate limiting middleware for these intents
+	rateLimitMiddleware := NewRateLimitMiddleware(maxRequests, timeWindow)
+	c.AddMiddlewareToIntents(intentCodes, rateLimitMiddleware)
+}
+
+// AddWithCache adds multiple intents with caching middleware
+func (c *CsAI) AddWithCache(intents []Intent, ttl time.Duration) {
+	// Add all intents
+	intentCodes := make([]string, len(intents))
+	for i, intent := range intents {
+		intentCodes[i] = intent.Code()
+		c.Add(intent)
+	}
+
+	// Add caching middleware for these intents
+	cacheMiddleware := NewCacheMiddleware(ttl, intentCodes)
+	c.middlewareChain.Add(cacheMiddleware)
+}
+
+// AddWithLogging adds multiple intents with logging middleware
+func (c *CsAI) AddWithLogging(intents []Intent, logger *log.Logger) {
+	// Add all intents
+	intentCodes := make([]string, len(intents))
+	for i, intent := range intents {
+		intentCodes[i] = intent.Code()
+		c.Add(intent)
+	}
+
+	// Add logging middleware for these intents
+	loggingMiddleware := NewLoggingMiddleware(logger)
+	c.AddMiddlewareToIntents(intentCodes, loggingMiddleware)
 }
 
 func (c *CsAI) containsIntent(i Intent) bool {
