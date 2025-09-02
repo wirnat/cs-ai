@@ -2,6 +2,7 @@ package cs_ai
 
 import (
 	"encoding/json"
+	"time"
 
 	"github.com/go-redis/redis/v8"
 )
@@ -16,6 +17,23 @@ type Options struct {
 	// === LLM Generation Parameters ===
 	Temperature float32 // Kontrol kreativitas output LLM (0.0-2.0, default 0.2)
 	TopP        float32 // Kontrol probabilitas sampling LLM (0.0-1.0, default 0.7)
+
+	// === Cache & Session Options ===
+	SessionTTL time.Duration // TTL untuk session messages (default: 12 jam)
+
+	// === Security Options ===
+	SecurityOptions *SecurityOptions // Security configuration
+}
+
+// SecurityOptions holds security configuration
+type SecurityOptions struct {
+	// Rate limiting
+	MaxRequestsPerMinute  int     // Maximum requests per minute (default: 10)
+	MaxRequestsPerHour    int     // Maximum requests per hour (default: 100)
+	MaxRequestsPerDay     int     // Maximum requests per day (default: 1000)
+	SpamThreshold         float64 // Spam detection threshold 0.0-1.0 (default: 0.5)
+	EnableSecurityLogging bool    // Enable security logging (default: true)
+	UserIDField           string  // Field to identify user (default: "ParticipantName")
 }
 
 type UserMessage struct {

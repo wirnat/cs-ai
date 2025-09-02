@@ -26,6 +26,28 @@ func New(ApiKey string, modeler Modeler, o ...Options) *CsAI {
 			// cs.learningManager = NewLearningManager(cs.options.Redis) // This line is removed
 		}
 	}
+
+	// Set default SessionTTL jika tidak diatur
+	if cs.options.SessionTTL == 0 {
+		cs.options.SessionTTL = 12 * time.Hour // Default 12 jam
+	}
+
+	// Initialize security manager if security options are provided
+	if o != nil && len(o) > 0 && o[0].SecurityOptions != nil {
+		cs.securityManager = NewSecurityManager(o[0].SecurityOptions)
+	} else {
+		// Default security manager with basic protection
+		defaultSecurity := &SecurityOptions{
+			MaxRequestsPerMinute:  10,
+			MaxRequestsPerHour:    100,
+			MaxRequestsPerDay:     1000,
+			SpamThreshold:         0.5,
+			EnableSecurityLogging: true,
+			UserIDField:           "ParticipantName",
+		}
+		cs.securityManager = NewSecurityManager(defaultSecurity)
+	}
+
 	return cs
 }
 
@@ -36,10 +58,24 @@ type CsAI struct {
 	options Options
 	// learningManager *LearningManager // This line is removed
 	middlewareChain *MiddlewareChain
+	securityManager *SecurityManager
 }
 
 // Exec mengeksekusi pesan ke AI
 func (c *CsAI) Exec(ctx context.Context, sessionID string, userMessage UserMessage, additionalSystemMessage ...string) (Message, error) {
+	// Security check
+	userID := userMessage.ParticipantName
+	if userID == "" {
+		userID = "anonymous"
+	}
+
+	// Check security if enabled
+	if c.securityManager != nil {
+		if err := c.securityManager.CheckSecurity(userID, sessionID, userMessage.Message); err != nil {
+			return Message{}, fmt.Errorf("security check failed: %v", err)
+		}
+	}
+
 	// ambil pesan lama (jika ada)
 	oldMessages, _ := c.GetSessionMessages(sessionID) // error bisa diabaikan
 	messages := make(Messages, 0)
@@ -562,4 +598,95 @@ func (c *CsAI) AddMessageToSession(sessionID string, msg Message) error {
 	messages = append(messages, msg)
 	_, err = c.SaveSessionMessages(sessionID, messages)
 	return err
+}
+
+// GetUsageAnalytics returns aggregated usage analytics for a given time range
+func (c *CsAI) GetUsageAnalytics(from, to time.Time) ([]UserAnalytics, error) {
+	if c.securityManager == nil {
+		return nil, fmt.Errorf("security manager not initialized")
+	}
+
+	analytics := c.securityManager.GetAllAnalytics(from, to)
+	return analytics, nil
+}
+
+// GetSecurityEvents returns security events for a given time range
+func (c *CsAI) GetSecurityEvents(from, to time.Time) []SecurityLog {
+	if c.securityManager == nil {
+		return []SecurityLog{}
+	}
+
+	var events []SecurityLog
+	analytics := c.securityManager.GetAllAnalytics(from, to)
+
+	for _, userAnalytics := range analytics {
+		userID := userAnalytics.UserID
+
+		// Convert UserAnalytics to SecurityLog format
+		// This is a simplified conversion - in real implementation, you'd need more detailed logs
+		events = append(events, SecurityLog{
+			UserID:    userID,
+			Timestamp: userAnalytics.StartTime,
+			Allowed:   userAnalytics.AllowedRequests > 0,
+			SpamScore: userAnalytics.AverageSpamScore,
+		})
+	}
+
+	return events
+}
+
+// GetTotalUsers returns the count of unique users in the given time range
+func (c *CsAI) GetTotalUsers(from, to time.Time) int64 {
+	if c.securityManager == nil {
+		return 0
+	}
+
+	analytics := c.securityManager.GetAllAnalytics(from, to)
+	return int64(len(analytics))
+}
+
+// GetRequestCounts returns total request counts for the given time range
+func (c *CsAI) GetRequestCounts(from, to time.Time) (total int64, allowed int64, denied int64) {
+	if c.securityManager == nil {
+		return 0, 0, 0
+	}
+
+	analytics := c.securityManager.GetAllAnalytics(from, to)
+
+	for _, userAnalytics := range analytics {
+		total += int64(userAnalytics.TotalRequests)
+		allowed += int64(userAnalytics.AllowedRequests)
+		denied += int64(userAnalytics.BlockedRequests)
+	}
+
+	return total, allowed, denied
+}
+
+// GetSpamAttempts returns the count of spam attempts in the given time range
+func (c *CsAI) GetSpamAttempts(from, to time.Time) int64 {
+	if c.securityManager == nil {
+		return 0
+	}
+
+	var spamAttempts int64
+	analytics := c.securityManager.GetAllAnalytics(from, to)
+
+	for _, userAnalytics := range analytics {
+		if userAnalytics.AverageSpamScore > 0 {
+			spamAttempts += int64(userAnalytics.TotalRequests)
+		}
+	}
+
+	return spamAttempts
+}
+
+// GetRateLimitHits returns the count of rate limit hits in the given time range
+func (c *CsAI) GetRateLimitHits(from, to time.Time) int64 {
+	if c.securityManager == nil {
+		return 0
+	}
+
+	// This would need to be implemented based on rate limiter logs
+	// For now, return 0 as the SecurityManager doesn't expose this directly
+	return 0
 }

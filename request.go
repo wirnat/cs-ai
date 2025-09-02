@@ -32,7 +32,7 @@ func Request(url string, method string, reqBody map[string]interface{}, setHeade
 	}
 	fmt.Println("Body:")
 	fmt.Println(string(jsonData)) // Pretty-print body
-	fmt.Println("===================================\n")
+	fmt.Println("===================================")
 
 	// Kirim request
 	client := &http.Client{}
@@ -66,7 +66,7 @@ func Request(url string, method string, reqBody map[string]interface{}, setHeade
 	}
 
 	fmt.Println(prettyJSON.String()) // Pretty-print JSON response
-	fmt.Println("===================================\n")
+	fmt.Println("===================================")
 
 	// Decode response JSON ke result
 	err = json.Unmarshal(bodyBytes, &result)

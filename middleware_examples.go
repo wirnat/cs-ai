@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"log"
 	"os"
-	"strings"
 	"time"
 )
 
@@ -249,48 +248,8 @@ func ExamplePracticalUsage() {
 	fmt.Println("✨ Practical middleware setup completed!")
 }
 
-// ExampleAdvancedUsage shows advanced middleware patterns
-func ExampleAdvancedUsage() {
-	csAI := New("your-api-key", nil /* your modeler */)
-
-	// Assume you have intents
-	var intents []Intent // your list of intents
-
-	// 1. Chain multiple middlewares for the same intents
-	authMiddleware := NewAuthenticationMiddleware("user")
-	rateLimitMiddleware := NewRateLimitMiddleware(10, time.Minute)
-
-	csAI.Adds(intents, authMiddleware)
-	csAI.Adds(intents, rateLimitMiddleware)
-
-	// 2. Add middleware to existing intent codes (without intent objects)
-	csAI.AddMiddlewareFuncToIntents([]string{"search", "lookup", "find"}, "cache_middleware", 20,
-		func(ctx context.Context, mctx *MiddlewareContext, next MiddlewareNext) (interface{}, error) {
-			// Custom caching logic here
-			return next(ctx, mctx)
-		})
-
-	// 3. Conditional middleware
-	csAI.AddGlobalMiddleware("conditional_auth", 5,
-		func(ctx context.Context, mctx *MiddlewareContext, next MiddlewareNext) (interface{}, error) {
-			// Only apply auth for sensitive operations
-			sensitiveOperations := []string{"delete", "update", "create"}
-			for _, op := range sensitiveOperations {
-				if strings.Contains(mctx.IntentCode, op) {
-					if mctx.Metadata["token"] == nil {
-						return nil, fmt.Errorf("authentication required for %s", mctx.IntentCode)
-					}
-					break
-				}
-			}
-			return next(ctx, mctx)
-		})
-
-	fmt.Println("🔧 Advanced middleware setup completed!")
-}
-
-// ExampleUsage demonstrates how to use the middleware system (legacy)
-func ExampleUsage() {
+// ExampleMiddlewareUsage demonstrates how to use the middleware system
+func ExampleMiddlewareUsage() {
 	// Initialize CS-AI
 	csAI := New("your-api-key", nil /* your modeler */)
 

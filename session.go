@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"time"
 )
 
 func (c *CsAI) GetSessionMessages(sessionID string) (ms []Message, err error) {
@@ -28,12 +29,21 @@ func (c *CsAI) SaveSessionMessages(sessionID string, m []Message) ([]Message, er
 	if c.options.Redis == nil {
 		return m, nil
 	}
+
 	key := fmt.Sprintf("ai:session:%s", sessionID)
 	data, err := json.Marshal(m)
 	if err != nil {
 		return m, err
 	}
-	err = c.options.Redis.Set(c.options.Redis.Context(), key, data, 0).Err()
+
+	// Set TTL dari Options atau default 12 jam untuk barbershop
+	var ttl time.Duration
+	if c.options.SessionTTL > 0 {
+		ttl = c.options.SessionTTL
+	} else {
+		ttl = 12 * time.Hour // Default TTL 12 jam
+	}
+	err = c.options.Redis.Set(c.options.Redis.Context(), key, data, ttl).Err()
 	if err != nil {
 		return m, err
 	}
