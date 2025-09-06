@@ -1,6 +1,9 @@
 package cs_ai
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"reflect"
 	"strings"
 )
@@ -95,4 +98,30 @@ func convertParam(param interface{}) (result map[string]interface{}, err error) 
 	result["properties"] = properties
 
 	return
+}
+
+// generateToolDefinitionHash generates a hash from tool definition to detect changes
+func generateToolDefinitionHash(intent Intent) (string, error) {
+	// Get tool definition
+	param, err := convertParam(intent.Param())
+	if err != nil {
+		return "", err
+	}
+
+	// Create tool definition structure
+	toolDef := map[string]interface{}{
+		"name":        intent.Code(),
+		"description": strings.Join(intent.Description(), ", "),
+		"parameters":  param,
+	}
+
+	// Convert to JSON for consistent hashing
+	jsonBytes, err := json.Marshal(toolDef)
+	if err != nil {
+		return "", err
+	}
+
+	// Generate SHA256 hash
+	hash := sha256.Sum256(jsonBytes)
+	return hex.EncodeToString(hash[:]), nil
 }

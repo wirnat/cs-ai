@@ -20,10 +20,54 @@ func New(ApiKey string, modeler Modeler, o ...Options) *CsAI {
 		Model:           modeler,
 		middlewareChain: NewMiddlewareChain(),
 	}
+
 	if len(o) > 0 {
 		cs.options = o[0]
-		if cs.options.EnableLearning && cs.options.Redis != nil {
-			// cs.learningManager = NewLearningManager(cs.options.Redis) // This line is removed
+
+		// Validate penalty values
+		if err := validatePenaltyValues(cs.options); err != nil {
+			// Log warning but don't fail initialization
+			fmt.Printf("Warning: Invalid penalty values: %v\n", err)
+		}
+
+		// Initialize storage provider
+		if cs.options.StorageProvider != nil {
+			// Use provided storage provider
+		} else if cs.options.StorageConfig != nil {
+			// Create storage provider from config
+			storageProvider, err := NewStorageProvider(*cs.options.StorageConfig)
+			if err != nil {
+				// Fallback to Redis if available
+				if cs.options.Redis != nil {
+					// Create Redis storage provider
+					redisConfig := StorageConfig{
+						Type:          StorageTypeRedis,
+						RedisAddress:  "localhost:6379", // Default fallback
+						RedisPassword: "",
+						RedisDB:       0,
+						SessionTTL:    cs.options.SessionTTL,
+						Timeout:       5 * time.Second,
+					}
+					cs.options.StorageProvider, _ = NewRedisStorageProvider(redisConfig)
+				}
+			} else {
+				cs.options.StorageProvider = storageProvider
+			}
+		} else if cs.options.Redis != nil {
+			// Legacy Redis support - create Redis storage provider
+			redisConfig := StorageConfig{
+				Type:          StorageTypeRedis,
+				RedisAddress:  "localhost:6379", // Default fallback
+				RedisPassword: "",
+				RedisDB:       0,
+				SessionTTL:    cs.options.SessionTTL,
+				Timeout:       5 * time.Second,
+			}
+			cs.options.StorageProvider, _ = NewRedisStorageProvider(redisConfig)
+		}
+
+		if cs.options.EnableLearning && cs.options.StorageProvider != nil {
+			// cs.learningManager = NewLearningManager(cs.options.StorageProvider) // This line is removed
 		}
 	}
 
@@ -33,7 +77,7 @@ func New(ApiKey string, modeler Modeler, o ...Options) *CsAI {
 	}
 
 	// Initialize security manager if security options are provided
-	if o != nil && len(o) > 0 && o[0].SecurityOptions != nil {
+	if len(o) > 0 && o[0].SecurityOptions != nil {
 		cs.securityManager = NewSecurityManager(o[0].SecurityOptions)
 	} else {
 		// Default security manager with basic protection
@@ -139,6 +183,14 @@ func (c *CsAI) Exec(ctx context.Context, sessionID string, userMessage UserMessa
 	loopCount := 0
 	processor := &DefaultResponseProcessor{}
 
+	// Create tool definition hash map for cache invalidation
+	toolDefinitionHashes := make(map[string]string)
+	for _, intent := range c.intents {
+		if hash, err := generateToolDefinitionHash(intent); err == nil {
+			toolDefinitionHashes[intent.Code()] = hash
+		}
+	}
+
 	for len(aiResponse.ToolCalls) > 0 {
 		loopCount++
 		if loopCount > maxLoop {
@@ -146,9 +198,11 @@ func (c *CsAI) Exec(ctx context.Context, sessionID string, userMessage UserMessa
 			// Cek semua tool calls yang ada di cache
 			var validResponses []Message
 			for _, tool := range aiResponse.ToolCalls {
+				toolDefinitionHash := toolDefinitionHashes[tool.Function.Name]
 				cacheKey := ToolCacheKey{
-					FunctionName: tool.Function.Name,
-					Arguments:    tool.Function.Arguments,
+					FunctionName:       tool.Function.Name,
+					Arguments:          tool.Function.Arguments,
+					ToolDefinitionHash: toolDefinitionHash,
 				}
 				if response, exists := toolCache[cacheKey]; exists && isValidResponse(response) {
 					validResponses = append(validResponses, response)
@@ -184,9 +238,11 @@ func (c *CsAI) Exec(ctx context.Context, sessionID string, userMessage UserMessa
 
 		// Proses semua tool calls dalam satu iterasi
 		for _, tool := range aiResponse.ToolCalls {
+			toolDefinitionHash := toolDefinitionHashes[tool.Function.Name]
 			cacheKey := ToolCacheKey{
-				FunctionName: tool.Function.Name,
-				Arguments:    tool.Function.Arguments,
+				FunctionName:       tool.Function.Name,
+				Arguments:          tool.Function.Arguments,
+				ToolDefinitionHash: toolDefinitionHash,
 			}
 
 			if processedTools[cacheKey] {
@@ -346,7 +402,7 @@ func (c *CsAI) Send(messages Messages, additionalSystemMessage ...string) (conte
 	reqBody := map[string]interface{}{
 		"model":             c.Model.ModelName(),
 		"messages":          roleMessage,
-		"frequency_penalty": 0,
+		"frequency_penalty": 0.0,
 		"max_tokens":        1200,
 		"presence_penalty":  -1.5,
 		"stop":              nil,
@@ -365,6 +421,12 @@ func (c *CsAI) Send(messages Messages, additionalSystemMessage ...string) (conte
 	}
 	if c.options.TopP != 0 {
 		reqBody["top_p"] = c.options.TopP
+	}
+	if c.options.FrequencyPenalty != 0 {
+		reqBody["frequency_penalty"] = c.options.FrequencyPenalty
+	}
+	if c.options.PresencePenalty != 0 {
+		reqBody["presence_penalty"] = c.options.PresencePenalty
 	}
 
 	if !c.options.UseTool {
@@ -689,4 +751,41 @@ func (c *CsAI) GetRateLimitHits(from, to time.Time) int64 {
 	// This would need to be implemented based on rate limiter logs
 	// For now, return 0 as the SecurityManager doesn't expose this directly
 	return 0
+}
+
+// ClearToolCache clears the tool cache for a specific session or all sessions
+// This is useful when tool definitions have changed and you want to force fresh execution
+func (c *CsAI) ClearToolCache(sessionID ...string) error {
+	// Note: This method is for future implementation when we have persistent tool cache
+	// Currently tool cache is only in-memory per Exec() call, so this is a placeholder
+	// for when we implement persistent tool caching across sessions
+
+	if len(sessionID) > 0 {
+		// Clear cache for specific session
+		// Implementation would depend on storage provider
+		return nil
+	}
+
+	// Clear all tool caches
+	// Implementation would depend on storage provider
+	return nil
+}
+
+// InvalidateToolDefinitionCache forces regeneration of tool definitions
+// Call this method after modifying tool parameters, required fields, or descriptions
+func (c *CsAI) InvalidateToolDefinitionCache() {
+	// This method can be used to signal that tool definitions have changed
+	// In the current implementation, tool definitions are regenerated on each Send() call
+	// But this provides a hook for future persistent caching implementations
+}
+
+// validatePenaltyValues validates that penalty values are within valid ranges
+func validatePenaltyValues(options Options) error {
+	if options.FrequencyPenalty != 0 && (options.FrequencyPenalty < -2.0 || options.FrequencyPenalty > 2.0) {
+		return fmt.Errorf("frequency_penalty must be between -2.0 and 2.0, got %f", options.FrequencyPenalty)
+	}
+	if options.PresencePenalty != 0 && (options.PresencePenalty < -2.0 || options.PresencePenalty > 2.0) {
+		return fmt.Errorf("presence_penalty must be between -2.0 and 2.0, got %f", options.PresencePenalty)
+	}
+	return nil
 }

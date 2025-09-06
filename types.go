@@ -8,15 +8,22 @@ import (
 )
 
 type Options struct {
-	Redis          *redis.Client // Use *redis.Client for Redis
+	// === Storage Options ===
+	StorageProvider StorageProvider // Storage provider (Redis, MongoDB, DynamoDB, etc.)
+	StorageConfig   *StorageConfig  // Storage configuration
+
+	// === Legacy Redis Support (deprecated, use StorageProvider instead) ===
+	Redis          *redis.Client // Use *redis.Client for Redis (deprecated)
 	UseTool        bool          // Gunakan tool handler api
 	LogChatFile    bool          // Simpan chat ke file
 	EnableLearning bool          // Aktifkan learning manager
 	ResponseType   ResponseType  // Tipe response
 
 	// === LLM Generation Parameters ===
-	Temperature float32 // Kontrol kreativitas output LLM (0.0-2.0, default 0.2)
-	TopP        float32 // Kontrol probabilitas sampling LLM (0.0-1.0, default 0.7)
+	Temperature      float32 // Kontrol kreativitas output LLM (0.0-2.0, default 0.2)
+	TopP             float32 // Kontrol probabilitas sampling LLM (0.0-1.0, default 0.7)
+	FrequencyPenalty float32 // Kontrol repetisi token (-2.0-2.0, default 0.0)
+	PresencePenalty  float32 // Kontrol repetisi topik (-2.0-2.0, default -1.5)
 
 	// === Cache & Session Options ===
 	SessionTTL time.Duration // TTL untuk session messages (default: 12 jam)
@@ -71,6 +78,7 @@ func (p *DefaultResponseProcessor) Process(data interface{}) (string, error) {
 }
 
 type ToolCacheKey struct {
-	FunctionName string
-	Arguments    string
+	FunctionName       string
+	Arguments          string
+	ToolDefinitionHash string // Hash dari tool definition untuk invalidate cache saat tool berubah
 }
