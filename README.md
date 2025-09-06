@@ -31,7 +31,7 @@ CS-AI adalah package Go yang menyediakan interface untuk AI conversation dengan 
 
 ## 🚀 Fitur Utama
 
-- **Multiple Storage Backends**: Redis, MongoDB, DynamoDB, In-Memory
+- **Multiple Storage Backends**: Redis ✅, MongoDB ✅, DynamoDB 🚧, In-Memory ✅
 - **Unified Interface**: API yang sama untuk semua storage
 - **Backward Compatibility**: Kode lama tetap berfungsi
 - **Easy Migration**: Ganti storage tanpa ubah kode
@@ -41,6 +41,9 @@ CS-AI adalah package Go yang menyediakan interface untuk AI conversation dengan 
 - **Intent System**: Powerful intent-based conversation handling
 - **Middleware Support**: Authentication, rate limiting, caching, logging
 - **Tool Function Integration**: Seamless AI tool calling with intent handlers
+- **Learning Data Storage**: AI model improvement dengan feedback system
+- **Performance Optimization**: Automatic indexing dan connection pooling
+- **Production Ready**: MongoDB dan Redis fully implemented untuk production use
 
 ## 📦 Storage Providers
 
@@ -54,20 +57,127 @@ CS-AI adalah package Go yang menyediakan interface untuk AI conversation dengan 
 - Built-in cleanup dan statistics
 - Tidak ada external dependencies
 
-### 3. MongoDB Storage (Stub Implementation)
-- Interface ready, implementation pending
-- Memerlukan MongoDB driver dependency
-- Planned features: connection pooling, indexes
+### 3. MongoDB Storage (Fully Implemented)
+- **Production-ready** dengan connection pooling dan automatic indexing
+- **TTL Support** dengan automatic session expiration
+- **Learning Data Storage** untuk AI model improvement
+- **Security Logs** untuk monitoring dan audit
+- **Performance Optimization** dengan compound indexes
+- **Flexible Schema** untuk complex data structures
+- **Horizontal Scaling** support dengan MongoDB clusters
+- **Configurable Collections** untuk different data types
+- **Health Monitoring** dengan built-in health checks
+- **Statistics & Analytics** untuk usage tracking
 
 ### 4. DynamoDB Storage (Stub Implementation)
 - Interface ready, implementation pending
 - Memerlukan AWS SDK dependency
 - Planned features: auto-scaling, backup
 
+## 🗄️ Storage Configuration Examples
+
+### MongoDB Configuration
+
+```go
+import (
+    "time"
+    cs_ai "github.com/wirnat/cs-ai"
+    "github.com/wirnat/cs-ai/model"
+)
+
+// Basic MongoDB setup
+mongoConfig := cs_ai.StorageConfig{
+    Type:            cs_ai.StorageTypeMongo,
+    MongoURI:        "mongodb://localhost:27017",
+    MongoDatabase:   "cs_ai",
+    MongoCollection: "sessions",
+    SessionTTL:      24 * time.Hour,
+    Timeout:         10 * time.Second,
+}
+
+cs := cs_ai.New("your-api-key", model.NewDeepSeekChat(), cs_ai.Options{
+    StorageConfig: &mongoConfig,
+    UseTool:       true,
+    SessionTTL:    24 * time.Hour,
+})
+
+// Production MongoDB setup with authentication
+mongoConfigProd := cs_ai.StorageConfig{
+    Type:            cs_ai.StorageTypeMongo,
+    MongoURI:        "mongodb://username:password@cluster.mongodb.net:27017",
+    MongoDatabase:   "production_cs_ai",
+    MongoCollection: "user_sessions",
+    SessionTTL:      48 * time.Hour,
+    Timeout:         15 * time.Second,
+    MaxRetries:      3,
+}
+
+// MongoDB Atlas setup
+mongoConfigAtlas := cs_ai.StorageConfig{
+    Type:            cs_ai.StorageTypeMongo,
+    MongoURI:        "mongodb+srv://username:password@cluster.mongodb.net/cs_ai?retryWrites=true&w=majority",
+    MongoDatabase:   "cs_ai",
+    MongoCollection: "sessions",
+    SessionTTL:      12 * time.Hour,
+    Timeout:         10 * time.Second,
+}
+```
+
+### Redis Configuration
+
+```go
+// Basic Redis setup
+redisConfig := cs_ai.StorageConfig{
+    Type:          cs_ai.StorageTypeRedis,
+    RedisAddress:  "localhost:6379",
+    RedisPassword: "",
+    RedisDB:       0,
+    SessionTTL:    12 * time.Hour,
+    Timeout:       5 * time.Second,
+}
+
+// Redis with authentication
+redisConfigAuth := cs_ai.StorageConfig{
+    Type:          cs_ai.StorageTypeRedis,
+    RedisAddress:  "localhost:6379",
+    RedisPassword: "your-redis-password",
+    RedisDB:       1,
+    SessionTTL:    12 * time.Hour,
+    Timeout:       5 * time.Second,
+}
+```
+
+### In-Memory Configuration
+
+```go
+// For development/testing
+memoryConfig := cs_ai.StorageConfig{
+    Type:       cs_ai.StorageTypeInMemory,
+    SessionTTL: 1 * time.Hour,
+    Timeout:    1 * time.Second,
+}
+```
+
 ## 🛠️ Installation
 
 ```bash
 go get github.com/wirnat/cs-ai
+```
+
+### MongoDB Dependencies
+
+Untuk menggunakan MongoDB storage, tambahkan dependency MongoDB driver:
+
+```bash
+go get go.mongodb.org/mongo-driver/mongo
+```
+
+### Redis Dependencies
+
+Untuk menggunakan Redis storage, tambahkan dependency Redis client:
+
+```bash
+go get github.com/redis/go-redis/v9
 ```
 
 ## ⚡ Quick Reference Card
@@ -820,7 +930,7 @@ cs := cs_ai.New("api-key", model.NewDeepSeekChat(), cs_ai.Options{
 })
 ```
 
-### MongoDB Storage (Stub)
+### MongoDB Storage (Fully Implemented)
 
 ```go
 // MongoDB configuration
@@ -1242,6 +1352,107 @@ func (s *SessionData) TrimMessages(maxMessages int) {
 }
 ```
 
+## 🍃 MongoDB-Specific Features
+
+### Automatic Indexing
+
+MongoDB storage provider secara otomatis membuat indexes untuk performa optimal:
+
+```go
+// Indexes yang dibuat otomatis:
+// 1. session_id (unique)
+// 2. expires_at (TTL index)
+// 3. user_id + timestamp (compound index)
+```
+
+### Learning Data Management
+
+```go
+// Simpan learning data untuk AI improvement
+learningData := cs_ai.LearningData{
+    Query:     "user query",
+    Response:  "ai response",
+    Tools:     []string{"tool1", "tool2"},
+    Context:   map[string]interface{}{"key": "value"},
+    Feedback:  1, // 1 = positive, -1 = negative, 0 = neutral
+}
+
+// Data akan disimpan di collection "learning_data"
+err := cs.options.StorageProvider.SaveLearningData(ctx, learningData)
+```
+
+### Security Logging
+
+```go
+// Security logs otomatis disimpan untuk monitoring
+securityLog := cs_ai.SecurityLog{
+    SessionID:   "session-123",
+    UserID:      "user-456",
+    MessageHash: "hash-of-message",
+    Timestamp:   time.Now(),
+    SpamScore:   0.2,
+    Allowed:     true,
+    Error:       "",
+}
+
+// Data akan disimpan di collection "security_logs"
+err := cs.options.StorageProvider.SaveSecurityLog(ctx, securityLog)
+```
+
+### Storage Statistics
+
+```go
+// Get MongoDB storage statistics
+if mongoStorage, ok := cs.options.StorageProvider.(*cs_ai.MongoStorageProvider); ok {
+    stats := mongoStorage.GetStorageStats()
+    fmt.Printf("Total sessions: %v\n", stats["total_sessions"])
+    fmt.Printf("Total learning data: %v\n", stats["total_learning_data"])
+    fmt.Printf("Total security logs: %v\n", stats["total_security_logs"])
+    fmt.Printf("Data size (MB): %v\n", stats["data_size_mb"])
+    fmt.Printf("Storage size (MB): %v\n", stats["storage_size_mb"])
+}
+```
+
+### Health Monitoring
+
+```go
+// Check MongoDB connection health
+err := cs.options.StorageProvider.HealthCheck()
+if err != nil {
+    log.Printf("MongoDB health check failed: %v", err)
+}
+```
+
+### Production Best Practices
+
+```go
+// Production MongoDB configuration
+mongoConfig := cs_ai.StorageConfig{
+    Type:            cs_ai.StorageTypeMongo,
+    MongoURI:        "mongodb://user:pass@cluster1,cluster2,cluster3/db?replicaSet=rs0",
+    MongoDatabase:   "production_cs_ai",
+    MongoCollection: "sessions",
+    SessionTTL:      24 * time.Hour,
+    Timeout:         10 * time.Second,
+    MaxRetries:      3,
+}
+
+// Enable security features
+cs := cs_ai.New("api-key", model.NewDeepSeekChat(), cs_ai.Options{
+    StorageConfig: &mongoConfig,
+    UseTool:       true,
+    SessionTTL:    24 * time.Hour,
+    SecurityOptions: &cs_ai.SecurityOptions{
+        MaxRequestsPerMinute:  60,
+        MaxRequestsPerHour:    1000,
+        MaxRequestsPerDay:     10000,
+        SpamThreshold:         0.7,
+        EnableSecurityLogging: true,
+        UserIDField:           "ParticipantName",
+    },
+})
+```
+
 ## 📊 Monitoring & Observability
 
 ### Health Checks
@@ -1365,10 +1576,10 @@ Lihat direktori `example/` untuk contoh lengkap:
 Lihat file `storage_examples.go` untuk contoh lengkap penggunaan:
 
 - Redis storage setup
-- MongoDB storage setup (stub)
+- MongoDB storage setup (fully implemented)
 - In-memory storage setup
 - Custom storage provider
-- Storage migration
+- Storage migration examples
 - Health checking
 - Statistics
 
