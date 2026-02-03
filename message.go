@@ -3,6 +3,7 @@ package cs_ai
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 )
 
 type Role string
@@ -16,11 +17,29 @@ const (
 )
 
 type Message struct {
-	Content    string     `json:"content"`
-	Name       string     `json:"name"`
-	Role       Role       `json:"role"`
-	ToolCalls  []ToolCall `json:"tool_calls"`
-	ToolCallID string     `json:"tool_call_id"`
+	Content    string      `json:"content" bson:"content"`
+	ContentMap interface{} `json:"content_map,omitempty" bson:"content_map,omitempty"` // Auto-populated when Content is JSON
+	Name       string      `json:"name" bson:"name"`
+	Role       Role        `json:"role" bson:"role"`
+	ToolCalls  []ToolCall  `json:"tool_calls" bson:"tool_calls"`
+	ToolCallID string      `json:"tool_call_id" bson:"tool_call_id"`
+}
+
+// PrepareForStorage populates ContentMap if Content is valid JSON
+// Call this before saving to storage to enable JSON content as object
+func (m *Message) PrepareForStorage() {
+	if m.Content == "" {
+		return
+	}
+	trimmed := strings.TrimSpace(m.Content)
+	// Check if content looks like JSON object or array
+	if (strings.HasPrefix(trimmed, "{") && strings.HasSuffix(trimmed, "}")) ||
+		(strings.HasPrefix(trimmed, "[") && strings.HasSuffix(trimmed, "]")) {
+		var parsed interface{}
+		if err := json.Unmarshal([]byte(trimmed), &parsed); err == nil {
+			m.ContentMap = parsed
+		}
+	}
 }
 
 type ToolCall struct {

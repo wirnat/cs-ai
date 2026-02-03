@@ -162,6 +162,16 @@ func (c *CustomStorageProvider) DeleteSession(ctx context.Context, sessionID str
 	return nil
 }
 
+func (c *CustomStorageProvider) GetSystemMessages(ctx context.Context, sessionID string) ([]Message, error) {
+	// Implement your custom logic for retrieving pre-chat/default messages
+	return nil, nil
+}
+
+func (c *CustomStorageProvider) SaveSystemMessages(ctx context.Context, sessionID string, messages []Message, ttl time.Duration) error {
+	// Implement your custom logic for saving pre-chat/default messages
+	return nil
+}
+
 func (c *CustomStorageProvider) SaveLearningData(ctx context.Context, data LearningData) error {
 	// Implement your custom logic
 	return nil

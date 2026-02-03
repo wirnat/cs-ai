@@ -12,6 +12,10 @@ type StorageProvider interface {
 	SaveSessionMessages(ctx context.Context, sessionID string, messages []Message, ttl time.Duration) error
 	DeleteSession(ctx context.Context, sessionID string) error
 
+	// System messages management (pre-chat/default messages)
+	GetSystemMessages(ctx context.Context, sessionID string) ([]Message, error)
+	SaveSystemMessages(ctx context.Context, sessionID string, messages []Message, ttl time.Duration) error
+
 	// Learning data management
 	SaveLearningData(ctx context.Context, data LearningData) error
 	GetLearningData(ctx context.Context, days int) ([]LearningData, error)

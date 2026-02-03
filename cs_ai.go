@@ -120,6 +120,21 @@ func (c *CsAI) Exec(ctx context.Context, sessionID string, userMessage UserMessa
 		}
 	}
 
+	// Save system messages if provided
+	if len(additionalSystemMessage) > 0 {
+		systemMessages := make([]Message, 0, len(additionalSystemMessage))
+		for _, s := range additionalSystemMessage {
+			systemMessages = append(systemMessages, Message{
+				Content: s,
+				Role:    System,
+			})
+		}
+		if err := c.SaveSystemMessages(sessionID, systemMessages); err != nil {
+			// Log warning but don't fail - system messages are optional
+			fmt.Printf("Warning: Failed to save system messages: %v\n", err)
+		}
+	}
+
 	// ambil pesan lama (jika ada)
 	oldMessages, _ := c.GetSessionMessages(sessionID) // error bisa diabaikan
 	messages := make(Messages, 0)

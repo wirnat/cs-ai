@@ -86,3 +86,27 @@ func WriteMessagesToLog(sessionID string, dir string, messages []Message) error 
 	encoder.SetIndent("", "  ")
 	return encoder.Encode(messages)
 }
+
+// GetSystemMessages retrieves pre-chat/default system messages for a session
+func (c *CsAI) GetSystemMessages(sessionID string) ([]Message, error) {
+	if c.options.StorageProvider != nil {
+		ctx := context.Background()
+		return c.options.StorageProvider.GetSystemMessages(ctx, sessionID)
+	}
+	return nil, nil
+}
+
+// SaveSystemMessages saves pre-chat/default system messages for a session
+// These messages are stored separately from conversation messages and
+// can be used to persist custom system prompts per session
+func (c *CsAI) SaveSystemMessages(sessionID string, messages []Message) error {
+	if c.options.StorageProvider != nil {
+		ctx := context.Background()
+		ttl := c.options.SessionTTL
+		if ttl == 0 {
+			ttl = 12 * time.Hour // Default TTL 12 jam
+		}
+		return c.options.StorageProvider.SaveSystemMessages(ctx, sessionID, messages, ttl)
+	}
+	return nil
+}

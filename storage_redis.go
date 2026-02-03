@@ -57,6 +57,12 @@ func (r *RedisStorageProvider) GetSessionMessages(ctx context.Context, sessionID
 
 func (r *RedisStorageProvider) SaveSessionMessages(ctx context.Context, sessionID string, messages []Message, ttl time.Duration) error {
 	key := fmt.Sprintf("ai:session:%s", sessionID)
+
+	// Prepare messages for storage (populate ContentMap for JSON content)
+	for i := range messages {
+		messages[i].PrepareForStorage()
+	}
+
 	data, err := json.Marshal(messages)
 	if err != nil {
 		return fmt.Errorf("failed to marshal session messages: %v", err)
@@ -75,7 +81,44 @@ func (r *RedisStorageProvider) SaveSessionMessages(ctx context.Context, sessionI
 
 func (r *RedisStorageProvider) DeleteSession(ctx context.Context, sessionID string) error {
 	key := fmt.Sprintf("ai:session:%s", sessionID)
-	return r.client.Del(ctx, key).Err()
+	systemKey := fmt.Sprintf("ai:system:%s", sessionID)
+	return r.client.Del(ctx, key, systemKey).Err()
+}
+
+func (r *RedisStorageProvider) GetSystemMessages(ctx context.Context, sessionID string) ([]Message, error) {
+	key := fmt.Sprintf("ai:system:%s", sessionID)
+	data, err := r.client.Get(ctx, key).Result()
+	if err != nil {
+		if err == redis.Nil {
+			return nil, nil // System messages not found
+		}
+		return nil, fmt.Errorf("failed to get system messages from Redis: %v", err)
+	}
+
+	var messages []Message
+	if err := json.Unmarshal([]byte(data), &messages); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal system messages: %v", err)
+	}
+
+	return messages, nil
+}
+
+func (r *RedisStorageProvider) SaveSystemMessages(ctx context.Context, sessionID string, messages []Message, ttl time.Duration) error {
+	key := fmt.Sprintf("ai:system:%s", sessionID)
+	data, err := json.Marshal(messages)
+	if err != nil {
+		return fmt.Errorf("failed to marshal system messages: %v", err)
+	}
+
+	// Use provided TTL or default from config
+	if ttl == 0 {
+		ttl = r.config.SessionTTL
+	}
+	if ttl == 0 {
+		ttl = 12 * time.Hour // Default fallback
+	}
+
+	return r.client.Set(ctx, key, data, ttl).Err()
 }
 
 func (r *RedisStorageProvider) SaveLearningData(ctx context.Context, data LearningData) error {

@@ -18,11 +18,12 @@ type InMemoryStorageProvider struct {
 
 // MemorySession represents a session in memory
 type MemorySession struct {
-	SessionID string    `json:"session_id"`
-	Messages  []Message `json:"messages"`
-	TTL       time.Time `json:"ttl"`
-	CreatedAt time.Time `json:"created_at"`
-	UpdatedAt time.Time `json:"updated_at"`
+	SessionID      string    `json:"session_id"`
+	Messages       []Message `json:"messages"`
+	SystemMessages []Message `json:"system_messages"` // Pre-chat/default messages
+	TTL            time.Time `json:"ttl"`
+	CreatedAt      time.Time `json:"created_at"`
+	UpdatedAt      time.Time `json:"updated_at"`
 }
 
 // NewInMemoryStorageProvider creates a new in-memory storage provider
@@ -66,6 +67,11 @@ func (m *InMemoryStorageProvider) SaveSessionMessages(ctx context.Context, sessi
 		ttl = 12 * time.Hour // Default fallback
 	}
 
+	// Prepare messages for storage (populate ContentMap for JSON content)
+	for i := range messages {
+		messages[i].PrepareForStorage()
+	}
+
 	now := time.Now()
 	session := &MemorySession{
 		SessionID: sessionID,
@@ -92,6 +98,59 @@ func (m *InMemoryStorageProvider) DeleteSession(ctx context.Context, sessionID s
 	defer m.mu.Unlock()
 
 	delete(m.sessions, sessionID)
+	return nil
+}
+
+func (m *InMemoryStorageProvider) GetSystemMessages(ctx context.Context, sessionID string) ([]Message, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	session, exists := m.sessions[sessionID]
+	if !exists {
+		return nil, nil // Session not found
+	}
+
+	// Check if session is expired
+	if time.Now().After(session.TTL) {
+		delete(m.sessions, sessionID)
+		return nil, nil
+	}
+
+	return session.SystemMessages, nil
+}
+
+func (m *InMemoryStorageProvider) SaveSystemMessages(ctx context.Context, sessionID string, messages []Message, ttl time.Duration) error {
+	if ttl == 0 {
+		ttl = m.config.SessionTTL
+	}
+	if ttl == 0 {
+		ttl = 12 * time.Hour // Default fallback
+	}
+
+	now := time.Now()
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if existing, exists := m.sessions[sessionID]; exists {
+		// Update existing session with system messages
+		existing.SystemMessages = messages
+		existing.UpdatedAt = now
+		if now.Add(ttl).After(existing.TTL) {
+			existing.TTL = now.Add(ttl)
+		}
+	} else {
+		// Create new session with only system messages
+		m.sessions[sessionID] = &MemorySession{
+			SessionID:      sessionID,
+			Messages:       []Message{},
+			SystemMessages: messages,
+			TTL:            now.Add(ttl),
+			CreatedAt:      now,
+			UpdatedAt:      now,
+		}
+	}
+
 	return nil
 }
 

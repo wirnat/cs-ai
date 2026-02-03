@@ -123,6 +123,11 @@ func (m *MongoStorageProvider) SaveSessionMessages(ctx context.Context, sessionI
 	ctx, cancel := context.WithTimeout(ctx, m.config.Timeout)
 	defer cancel()
 
+	// Prepare messages for storage (populate ContentMap for JSON content)
+	for i := range messages {
+		messages[i].PrepareForStorage()
+	}
+
 	expiresAt := time.Now().Add(ttl)
 
 	sessionDoc := bson.M{
@@ -153,6 +158,60 @@ func (m *MongoStorageProvider) DeleteSession(ctx context.Context, sessionID stri
 	_, err := m.collection.DeleteOne(ctx, bson.M{"session_id": sessionID})
 	if err != nil {
 		return fmt.Errorf("failed to delete session: %w", err)
+	}
+
+	return nil
+}
+
+// GetSystemMessages retrieves system messages from MongoDB
+func (m *MongoStorageProvider) GetSystemMessages(ctx context.Context, sessionID string) ([]Message, error) {
+	ctx, cancel := context.WithTimeout(ctx, m.config.Timeout)
+	defer cancel()
+
+	var sessionDoc struct {
+		SessionID      string    `bson:"session_id"`
+		SystemMessages []Message `bson:"system_messages"`
+		ExpiresAt      time.Time `bson:"expires_at"`
+	}
+
+	err := m.collection.FindOne(ctx, bson.M{"session_id": sessionID}).Decode(&sessionDoc)
+	if err != nil {
+		if err == mongo.ErrNoDocuments {
+			return nil, nil // Session not found
+		}
+		return nil, fmt.Errorf("failed to get system messages: %w", err)
+	}
+
+	// Check if session has expired
+	if time.Now().After(sessionDoc.ExpiresAt) {
+		return nil, nil
+	}
+
+	return sessionDoc.SystemMessages, nil
+}
+
+// SaveSystemMessages saves system messages to MongoDB with TTL
+func (m *MongoStorageProvider) SaveSystemMessages(ctx context.Context, sessionID string, messages []Message, ttl time.Duration) error {
+	ctx, cancel := context.WithTimeout(ctx, m.config.Timeout)
+	defer cancel()
+
+	expiresAt := time.Now().Add(ttl)
+
+	// Use upsert to create or update session with system messages
+	opts := options.Update().SetUpsert(true)
+	filter := bson.M{"session_id": sessionID}
+	update := bson.M{
+		"$set": bson.M{
+			"session_id":      sessionID,
+			"system_messages": messages,
+			"expires_at":      expiresAt,
+			"updated_at":      time.Now(),
+		},
+	}
+
+	_, err := m.collection.UpdateOne(ctx, filter, update, opts)
+	if err != nil {
+		return fmt.Errorf("failed to save system messages: %w", err)
 	}
 
 	return nil
