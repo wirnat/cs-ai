@@ -100,7 +100,8 @@ func (m *MongoStorageProvider) GetSessionMessages(ctx context.Context, sessionID
 		ExpiresAt time.Time `bson:"expires_at"`
 	}
 
-	err := m.collection.FindOne(ctx, bson.M{"session_id": sessionID}).Decode(&sessionDoc)
+	findOpts := options.FindOne().SetSort(bson.D{{Key: "updated_at", Value: -1}})
+	err := m.collection.FindOne(ctx, bson.M{"session_id": sessionID}, findOpts).Decode(&sessionDoc)
 	if err != nil {
 		if err == mongo.ErrNoDocuments {
 			return nil, nil // Session not found
@@ -110,8 +111,8 @@ func (m *MongoStorageProvider) GetSessionMessages(ctx context.Context, sessionID
 
 	// Check if session has expired
 	if time.Now().After(sessionDoc.ExpiresAt) {
-		// Delete expired session
-		_, _ = m.collection.DeleteOne(ctx, bson.M{"session_id": sessionID})
+		// Delete all matching sessions to avoid stale duplicates.
+		_, _ = m.collection.DeleteMany(ctx, bson.M{"session_id": sessionID})
 		return nil, nil
 	}
 
@@ -142,7 +143,7 @@ func (m *MongoStorageProvider) SaveSessionMessages(ctx context.Context, sessionI
 	filter := bson.M{"session_id": sessionID}
 	update := bson.M{"$set": sessionDoc}
 
-	_, err := m.collection.UpdateOne(ctx, filter, update, opts)
+	_, err := m.collection.UpdateMany(ctx, filter, update, opts)
 	if err != nil {
 		return fmt.Errorf("failed to save session messages: %w", err)
 	}
@@ -155,7 +156,7 @@ func (m *MongoStorageProvider) DeleteSession(ctx context.Context, sessionID stri
 	ctx, cancel := context.WithTimeout(ctx, m.config.Timeout)
 	defer cancel()
 
-	_, err := m.collection.DeleteOne(ctx, bson.M{"session_id": sessionID})
+	_, err := m.collection.DeleteMany(ctx, bson.M{"session_id": sessionID})
 	if err != nil {
 		return fmt.Errorf("failed to delete session: %w", err)
 	}
@@ -174,7 +175,8 @@ func (m *MongoStorageProvider) GetSystemMessages(ctx context.Context, sessionID 
 		ExpiresAt      time.Time `bson:"expires_at"`
 	}
 
-	err := m.collection.FindOne(ctx, bson.M{"session_id": sessionID}).Decode(&sessionDoc)
+	findOpts := options.FindOne().SetSort(bson.D{{Key: "updated_at", Value: -1}})
+	err := m.collection.FindOne(ctx, bson.M{"session_id": sessionID}, findOpts).Decode(&sessionDoc)
 	if err != nil {
 		if err == mongo.ErrNoDocuments {
 			return nil, nil // Session not found
@@ -184,6 +186,7 @@ func (m *MongoStorageProvider) GetSystemMessages(ctx context.Context, sessionID 
 
 	// Check if session has expired
 	if time.Now().After(sessionDoc.ExpiresAt) {
+		_, _ = m.collection.DeleteMany(ctx, bson.M{"session_id": sessionID})
 		return nil, nil
 	}
 
@@ -209,7 +212,7 @@ func (m *MongoStorageProvider) SaveSystemMessages(ctx context.Context, sessionID
 		},
 	}
 
-	_, err := m.collection.UpdateOne(ctx, filter, update, opts)
+	_, err := m.collection.UpdateMany(ctx, filter, update, opts)
 	if err != nil {
 		return fmt.Errorf("failed to save system messages: %w", err)
 	}
