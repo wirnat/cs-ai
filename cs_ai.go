@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"sort"
 	"strings"
 	"time"
 )
@@ -196,15 +197,25 @@ func (c *CsAI) Exec(ctx context.Context, sessionID string, userMessage UserMessa
 	toolCache := make(map[ToolCacheKey]Message)
 	maxLoop := 10
 	loopCount := 0
+	invalidToolCalls := 0
+	successfulToolCalls := 0
+	maxInvalidToolCalls := 2
 	processor := &DefaultResponseProcessor{}
 
-	// Create tool definition hash map for cache invalidation
+	// Create tool lookup and definition hash map for cache invalidation
 	toolDefinitionHashes := make(map[string]string)
+	intentsByCode := make(map[string]Intent, len(c.intents))
+	availableTools := make([]string, 0, len(c.intents))
 	for _, intent := range c.intents {
+		intentCode := intent.Code()
+		intentsByCode[intentCode] = intent
+		availableTools = append(availableTools, intentCode)
+
 		if hash, err := generateToolDefinitionHash(intent); err == nil {
-			toolDefinitionHashes[intent.Code()] = hash
+			toolDefinitionHashes[intentCode] = hash
 		}
 	}
+	sort.Strings(availableTools)
 
 	for len(aiResponse.ToolCalls) > 0 {
 		loopCount++
@@ -248,7 +259,6 @@ func (c *CsAI) Exec(ctx context.Context, sessionID string, userMessage UserMessa
 		}
 
 		newMessages := make(Messages, 0)
-		processedTools := make(map[ToolCacheKey]bool)
 		toolCallResponses := make(map[string]Message)
 
 		// Proses semua tool calls dalam satu iterasi
@@ -259,11 +269,6 @@ func (c *CsAI) Exec(ctx context.Context, sessionID string, userMessage UserMessa
 				Arguments:          tool.Function.Arguments,
 				ToolDefinitionHash: toolDefinitionHash,
 			}
-
-			if processedTools[cacheKey] {
-				continue
-			}
-			processedTools[cacheKey] = true
 
 			if cachedResponse, exists := toolCache[cacheKey]; exists {
 				if isValidResponse(cachedResponse) {
@@ -276,72 +281,103 @@ func (c *CsAI) Exec(ctx context.Context, sessionID string, userMessage UserMessa
 				delete(toolCache, cacheKey)
 			}
 
-			for _, intent := range c.intents {
-				if intent.Code() == tool.Function.Name {
-					p := intent.Param()
-					err := json.Unmarshal([]byte(tool.Function.Arguments), &p)
-					if err != nil {
-						return Message{}, fmt.Errorf("failed to parse function arguments: %v", err)
-					}
-
-					paramMap, ok := p.(map[string]interface{})
-					if !ok {
-						return Message{}, fmt.Errorf("invalid function argument format")
-					}
-
-					// Create middleware context
-					middlewareCtx := &MiddlewareContext{
-						SessionID:       sessionID,
-						IntentCode:      intent.Code(),
-						UserMessage:     userMessage,
-						Parameters:      paramMap,
-						StartTime:       time.Now(),
-						Metadata:        make(map[string]interface{}),
-						PreviousResults: make([]interface{}, 0),
-					}
-
-					// Execute middleware chain with intent handler as final handler
-					finalHandler := func(ctx context.Context, mctx *MiddlewareContext) (interface{}, error) {
-						return intent.Handle(ctx, mctx.Parameters)
-					}
-
-					data, err := c.middlewareChain.Execute(ctx, middlewareCtx, finalHandler)
-					if err != nil {
-						return Message{}, err
-					}
-
-					// Validasi response sesuai dengan parameter
-					if err := validateResponse(data, paramMap); err != nil {
-						return Message{}, fmt.Errorf("invalid response for parameters: %v", err)
-					}
-
-					processedContent, err := processor.Process(data)
-					if err != nil {
-						return Message{}, fmt.Errorf("failed to process tool response: %v", err)
-					}
-
-					toolResponse := Message{
-						Content:    processedContent,
-						Role:       Tool,
-						ToolCallID: tool.Id,
-					}
-					toolCache[cacheKey] = toolResponse
-					toolCallResponses[tool.Id] = toolResponse
-					newMessages.Add(toolResponse)
-				}
+			intent, exists := intentsByCode[tool.Function.Name]
+			if !exists {
+				invalidToolCalls++
+				unavailableToolResponse := buildToolErrorMessage(
+					tool.Id,
+					"tool_not_found",
+					tool.Function.Name,
+					availableTools,
+				)
+				toolCallResponses[tool.Id] = unavailableToolResponse
+				newMessages.Add(unavailableToolResponse)
+				continue
 			}
+
+			p := intent.Param()
+			err := json.Unmarshal([]byte(tool.Function.Arguments), &p)
+			if err != nil {
+				invalidToolCalls++
+				invalidArgsResponse := buildToolErrorMessage(
+					tool.Id,
+					"invalid_tool_arguments",
+					tool.Function.Name,
+					availableTools,
+				)
+				toolCallResponses[tool.Id] = invalidArgsResponse
+				newMessages.Add(invalidArgsResponse)
+				continue
+			}
+
+			paramMap, ok := p.(map[string]interface{})
+			if !ok {
+				invalidToolCalls++
+				invalidArgsResponse := buildToolErrorMessage(
+					tool.Id,
+					"invalid_tool_argument_format",
+					tool.Function.Name,
+					availableTools,
+				)
+				toolCallResponses[tool.Id] = invalidArgsResponse
+				newMessages.Add(invalidArgsResponse)
+				continue
+			}
+
+			// Create middleware context
+			middlewareCtx := &MiddlewareContext{
+				SessionID:       sessionID,
+				IntentCode:      intent.Code(),
+				UserMessage:     userMessage,
+				Parameters:      paramMap,
+				StartTime:       time.Now(),
+				Metadata:        make(map[string]interface{}),
+				PreviousResults: make([]interface{}, 0),
+			}
+
+			// Execute middleware chain with intent handler as final handler
+			finalHandler := func(ctx context.Context, mctx *MiddlewareContext) (interface{}, error) {
+				return intent.Handle(ctx, mctx.Parameters)
+			}
+
+			data, err := c.middlewareChain.Execute(ctx, middlewareCtx, finalHandler)
+			if err != nil {
+				return Message{}, err
+			}
+
+			// Validasi response sesuai dengan parameter
+			if err := validateResponse(data, paramMap); err != nil {
+				return Message{}, fmt.Errorf("invalid response for parameters: %v", err)
+			}
+
+			processedContent, err := processor.Process(data)
+			if err != nil {
+				return Message{}, fmt.Errorf("failed to process tool response: %v", err)
+			}
+
+			toolResponse := Message{
+				Content:    processedContent,
+				Role:       Tool,
+				ToolCallID: tool.Id,
+			}
+			toolCache[cacheKey] = toolResponse
+			toolCallResponses[tool.Id] = toolResponse
+			successfulToolCalls++
+			newMessages.Add(toolResponse)
 		}
 
 		// Verifikasi bahwa setiap tool call memiliki response
 		for _, tool := range aiResponse.ToolCalls {
 			if _, exists := toolCallResponses[tool.Id]; !exists {
-				// Jika ada tool call yang tidak memiliki response, tambahkan response kosong
-				emptyResponse := Message{
-					Content:    "{}",
-					Role:       Tool,
-					ToolCallID: tool.Id,
-				}
-				newMessages.Add(emptyResponse)
+				invalidToolCalls++
+				unhandledToolResponse := buildToolErrorMessage(
+					tool.Id,
+					"tool_call_unhandled",
+					tool.Function.Name,
+					availableTools,
+				)
+				toolCallResponses[tool.Id] = unhandledToolResponse
+				newMessages.Add(unhandledToolResponse)
 			}
 		}
 
@@ -350,6 +386,13 @@ func (c *CsAI) Exec(ctx context.Context, sessionID string, userMessage UserMessa
 		}
 
 		messages.Add(newMessages...)
+		if invalidToolCalls >= maxInvalidToolCalls && successfulToolCalls == 0 {
+			safeResponse := buildToolSafetyFallbackMessage(userMessage.ParticipantName)
+			messages.Add(safeResponse)
+			_, _ = c.SaveSessionMessages(sessionID, messages)
+			return safeResponse, nil
+		}
+
 		aiResponse, err = c.Send(messages, additionalSystemMessage...)
 		if err != nil {
 			return Message{}, err
@@ -359,6 +402,13 @@ func (c *CsAI) Exec(ctx context.Context, sessionID string, userMessage UserMessa
 		if aiResponse.Role == Assistant && len(aiResponse.ToolCalls) == 0 {
 			break
 		}
+	}
+
+	if invalidToolCalls > 0 && successfulToolCalls == 0 && aiResponse.Role == Assistant && len(aiResponse.ToolCalls) == 0 {
+		safeResponse := buildToolSafetyFallbackMessage(userMessage.ParticipantName)
+		messages.Add(safeResponse)
+		_, _ = c.SaveSessionMessages(sessionID, messages)
+		return safeResponse, nil
 	}
 
 	// simpan semua percakapan ke redis setelah selesai
@@ -647,6 +697,22 @@ func (c *CsAI) getModelMessage(additionalSystemMessage ...string) (m Messages) {
 		})
 	}
 
+	if len(c.intents) > 0 {
+		toolNames := make([]string, 0, len(c.intents))
+		for _, intent := range c.intents {
+			toolNames = append(toolNames, intent.Code())
+		}
+		sort.Strings(toolNames)
+
+		m.Add(Message{
+			Content: fmt.Sprintf(
+				"Daftar tool yang tersedia: %s. Hanya panggil tool dari daftar ini dengan nama persis sama. Jika tidak ada tool yang cocok, jangan memanggil tool.",
+				strings.Join(toolNames, ", "),
+			),
+			Role: System,
+		})
+	}
+
 	today := time.Now()
 	//parse today to Wendesday, 2023 February 01
 	date := today.Format("Monday, 2006 January 02")
@@ -656,6 +722,35 @@ func (c *CsAI) getModelMessage(additionalSystemMessage ...string) (m Messages) {
 		Role:    System,
 	})
 	return
+}
+
+func buildToolErrorMessage(toolCallID string, errorCode string, requestedTool string, availableTools []string) Message {
+	payload := map[string]interface{}{
+		"error": map[string]interface{}{
+			"code":            errorCode,
+			"requested_tool":  requestedTool,
+			"available_tools": availableTools,
+		},
+	}
+
+	content, err := json.Marshal(payload)
+	if err != nil {
+		content = []byte(`{"error":{"code":"tool_error_payload_failed"}}`)
+	}
+
+	return Message{
+		Content:    string(content),
+		Role:       Tool,
+		ToolCallID: toolCallID,
+	}
+}
+
+func buildToolSafetyFallbackMessage(participantName string) Message {
+	return Message{
+		Content: "Maaf, saya tidak dapat melanjutkan karena ada ketidaksesuaian pemanggilan tool internal. Silakan coba lagi.",
+		Name:    participantName,
+		Role:    Assistant,
+	}
 }
 
 // AddMessageToSession adds a message to the session history without triggering LLM or tool call logic.

@@ -124,6 +124,8 @@ func (m *MongoStorageProvider) SaveSessionMessages(ctx context.Context, sessionI
 	ctx, cancel := context.WithTimeout(ctx, m.config.Timeout)
 	defer cancel()
 
+	EnsureAutoIncrementMessageIDs(messages)
+
 	// Prepare messages for storage (populate ContentMap for JSON content)
 	for i := range messages {
 		messages[i].PrepareForStorage()

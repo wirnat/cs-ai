@@ -44,6 +44,10 @@ func (c *CsAI) GetSessionMessageCount(sessionID string) (int, error) {
 }
 
 func (c *CsAI) SaveSessionMessages(sessionID string, m []Message) ([]Message, error) {
+	// Always normalize IDs before persisting so every storage backend
+	// stores stable 1-based auto-increment IDs.
+	EnsureAutoIncrementMessageIDs(m)
+
 	if c.options.StorageProvider != nil {
 		ctx := context.Background()
 		ttl := c.options.SessionTTL
@@ -139,24 +143,40 @@ func (c *CsAI) ClearSession(sessionID string) error {
 }
 
 // DeleteMessageFromSession removes a specific message and all subsequent messages
-// from a session by its 1-based index (truncate from that point onward).
+// from a session by its message ID (truncate from that point onward).
 // It ensures the truncation point is safe for the AI API by removing any
 // trailing assistant messages with tool_calls that lack their corresponding
 // tool response messages.
-func (c *CsAI) DeleteMessageFromSession(sessionID string, messageIndex int) error {
+func (c *CsAI) DeleteMessageFromSession(sessionID string, messageID int) error {
 	if sessionID == "" {
 		return fmt.Errorf("sessionID cannot be empty")
+	}
+	if messageID <= 0 {
+		return fmt.Errorf("message id must be greater than 0")
 	}
 
 	messages, err := c.GetSessionMessages(sessionID)
 	if err != nil {
 		return fmt.Errorf("failed to get session messages: %v", err)
 	}
+	if len(messages) == 0 {
+		return fmt.Errorf("message id %d not found (session has 0 messages)", messageID)
+	}
 
-	// Convert 1-based index to 0-based
-	idx := messageIndex - 1
-	if idx < 0 || idx >= len(messages) {
-		return fmt.Errorf("message index %d out of range (session has %d messages)", messageIndex, len(messages))
+	// Normalize IDs in-memory first to handle legacy sessions that were saved
+	// before message IDs existed.
+	EnsureAutoIncrementMessageIDs(messages)
+
+	// Find target index by ID.
+	idx := -1
+	for i := range messages {
+		if messages[i].ID == messageID {
+			idx = i
+			break
+		}
+	}
+	if idx == -1 {
+		return fmt.Errorf("message id %d not found (session has %d messages)", messageID, len(messages))
 	}
 
 	// Truncate: keep only messages before idx

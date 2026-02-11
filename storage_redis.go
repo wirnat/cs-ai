@@ -58,6 +58,8 @@ func (r *RedisStorageProvider) GetSessionMessages(ctx context.Context, sessionID
 func (r *RedisStorageProvider) SaveSessionMessages(ctx context.Context, sessionID string, messages []Message, ttl time.Duration) error {
 	key := fmt.Sprintf("ai:session:%s", sessionID)
 
+	EnsureAutoIncrementMessageIDs(messages)
+
 	// Prepare messages for storage (populate ContentMap for JSON content)
 	for i := range messages {
 		messages[i].PrepareForStorage()

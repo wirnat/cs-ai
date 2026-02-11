@@ -18,7 +18,8 @@ const (
 
 type Message struct {
 	Content    string      `json:"content" bson:"content"`
-	ContentMap interface{} `json:"content_map,omitempty" bson:"content_map,omitempty"` // Auto-populated when Content is JSON
+	ContentMap interface{} `json:"content_map,omitempty" bson:"content_map,omitempty"`         // Auto-populated when Content is JSON
+	ID         int         `json:"id,omitempty" bson:"id,omitempty" dynamodbav:"id,omitempty"` // 1-based incremental ID per session
 	Name       string      `json:"name" bson:"name"`
 	Role       Role        `json:"role" bson:"role"`
 	ToolCalls  []ToolCall  `json:"tool_calls" bson:"tool_calls"`
@@ -40,6 +41,19 @@ func (m *Message) PrepareForStorage() {
 			m.ContentMap = parsed
 		}
 	}
+}
+
+// EnsureAutoIncrementMessageIDs guarantees sequential 1-based message IDs
+// for the current order of messages in a session.
+func EnsureAutoIncrementMessageIDs(messages []Message) (changed bool) {
+	for i := range messages {
+		expectedID := i + 1
+		if messages[i].ID != expectedID {
+			messages[i].ID = expectedID
+			changed = true
+		}
+	}
+	return changed
 }
 
 type ToolCall struct {
@@ -86,6 +100,9 @@ func (m Message) MessageToMap() (map[string]interface{}, error) {
 	if err != nil {
 		return nil, err
 	}
+
+	// Internal storage ID should not be sent to model APIs.
+	delete(result, "id")
 
 	return result, nil
 }
