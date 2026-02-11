@@ -220,42 +220,8 @@ func (c *CsAI) Exec(ctx context.Context, sessionID string, userMessage UserMessa
 	for len(aiResponse.ToolCalls) > 0 {
 		loopCount++
 		if loopCount > maxLoop {
-			fmt.Println("Max loop reached, returning last known response.")
-			// Cek semua tool calls yang ada di cache
-			var validResponses []Message
-			for _, tool := range aiResponse.ToolCalls {
-				toolDefinitionHash := toolDefinitionHashes[tool.Function.Name]
-				cacheKey := ToolCacheKey{
-					FunctionName:       tool.Function.Name,
-					Arguments:          tool.Function.Arguments,
-					ToolDefinitionHash: toolDefinitionHash,
-				}
-				if response, exists := toolCache[cacheKey]; exists && isValidResponse(response) {
-					validResponses = append(validResponses, response)
-				}
-			}
-
-			if len(validResponses) > 0 {
-				// Gabungkan semua valid responses dengan format yang lebih jelas
-				combinedContent := make([]string, 0)
-				for _, resp := range validResponses {
-					combinedContent = append(combinedContent, resp.Content)
-				}
-
-				finalResponse := Message{
-					Content: strings.Join(combinedContent, "\n\n"),
-					Name:    userMessage.ParticipantName,
-					Role:    "assistant",
-				}
-				_, _ = c.SaveSessionMessages(sessionID, messages)
-				return finalResponse, nil
-			}
-
-			return Message{
-				Content: "Maaf, sistem sedang sibuk. Silakan coba lagi dalam beberapa saat.",
-				Name:    userMessage.ParticipantName,
-				Role:    "assistant",
-			}, nil
+			_, _ = c.SaveSessionMessages(sessionID, messages)
+			return Message{}, fmt.Errorf("max tool-call loop reached (%d)", maxLoop)
 		}
 
 		newMessages := make(Messages, 0)
@@ -295,7 +261,8 @@ func (c *CsAI) Exec(ctx context.Context, sessionID string, userMessage UserMessa
 				continue
 			}
 
-			p := intent.Param()
+			paramTemplate := intent.Param()
+			p := paramTemplate
 			err := json.Unmarshal([]byte(tool.Function.Arguments), &p)
 			if err != nil {
 				invalidToolCalls++
@@ -316,6 +283,20 @@ func (c *CsAI) Exec(ctx context.Context, sessionID string, userMessage UserMessa
 				invalidArgsResponse := buildToolErrorMessage(
 					tool.Id,
 					"invalid_tool_argument_format",
+					tool.Function.Name,
+					availableTools,
+				)
+				toolCallResponses[tool.Id] = invalidArgsResponse
+				newMessages.Add(invalidArgsResponse)
+				continue
+			}
+
+			paramMap, err = normalizeToolArguments(paramTemplate, paramMap)
+			if err != nil {
+				invalidToolCalls++
+				invalidArgsResponse := buildToolErrorMessage(
+					tool.Id,
+					"invalid_tool_argument_type",
 					tool.Function.Name,
 					availableTools,
 				)
@@ -402,6 +383,11 @@ func (c *CsAI) Exec(ctx context.Context, sessionID string, userMessage UserMessa
 		if aiResponse.Role == Assistant && len(aiResponse.ToolCalls) == 0 {
 			break
 		}
+	}
+
+	if overridden, shouldOverride := shouldOverrideAssistantWithToolMessage(messages); shouldOverride {
+		messages[len(messages)-1] = overridden
+		aiResponse = overridden
 	}
 
 	if invalidToolCalls > 0 && successfulToolCalls == 0 && aiResponse.Role == Assistant && len(aiResponse.ToolCalls) == 0 {
