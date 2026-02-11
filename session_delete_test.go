@@ -44,7 +44,7 @@ func TestDeleteMessageFromSession_TruncatesAndPersists(t *testing.T) {
 		t.Fatalf("failed to seed session messages: %v", err)
 	}
 
-	// Delete message #3 (1-based). Messages #3 and #4 should be removed.
+	// Delete message with ID #3. Messages ID #3 and above should be removed.
 	if err := cs.DeleteMessageFromSession(sessionID, 3); err != nil {
 		t.Fatalf("DeleteMessageFromSession returned error: %v", err)
 	}
@@ -59,6 +59,9 @@ func TestDeleteMessageFromSession_TruncatesAndPersists(t *testing.T) {
 	}
 	if got[0].Content != "user-1" || got[1].Content != "assistant-1" {
 		t.Fatalf("unexpected messages after truncation: %+v", got)
+	}
+	if got[0].ID != 1 || got[1].ID != 2 {
+		t.Fatalf("expected remaining IDs to be [1,2], got [%d,%d]", got[0].ID, got[1].ID)
 	}
 }
 
@@ -81,7 +84,7 @@ func TestDeleteMessageFromSession_RemovesUnsafeTrailingToolContext(t *testing.T)
 		t.Fatalf("failed to seed session messages: %v", err)
 	}
 
-	// Delete message #4. Raw truncation would end at a tool response (#3),
+	// Delete message with ID #4. Raw truncation would end at a tool response (#3),
 	// so delete logic must also remove trailing tool + assistant(tool_calls).
 	if err := cs.DeleteMessageFromSession(sessionID, 4); err != nil {
 		t.Fatalf("DeleteMessageFromSession returned error: %v", err)
@@ -98,20 +101,54 @@ func TestDeleteMessageFromSession_RemovesUnsafeTrailingToolContext(t *testing.T)
 	if got[0].Role != User || got[0].Content != "show data" {
 		t.Fatalf("unexpected remaining message: %+v", got[0])
 	}
+	if got[0].ID != 1 {
+		t.Fatalf("expected remaining message ID to be 1, got %d", got[0].ID)
+	}
 }
 
-func TestDeleteMessageFromSession_InvalidIndex(t *testing.T) {
+func TestDeleteMessageFromSession_InvalidID(t *testing.T) {
 	cs := newTestCsAIWithInMemoryStorage(t)
-	sessionID := "delete-invalid-index"
+	sessionID := "delete-invalid-id"
 
 	if _, err := cs.SaveSessionMessages(sessionID, []Message{{Role: User, Content: "hello"}}); err != nil {
 		t.Fatalf("failed to seed session messages: %v", err)
 	}
 
 	if err := cs.DeleteMessageFromSession(sessionID, 0); err == nil {
-		t.Fatal("expected error for index 0, got nil")
+		t.Fatal("expected error for id 0, got nil")
 	}
 	if err := cs.DeleteMessageFromSession(sessionID, 2); err == nil {
 		t.Fatal("expected out-of-range error, got nil")
+	}
+}
+
+func TestSaveSessionMessages_AssignsAutoIncrementIDs(t *testing.T) {
+	cs := newTestCsAIWithInMemoryStorage(t)
+	sessionID := "auto-increment-ids"
+
+	seed := []Message{
+		{Role: User, Content: "first", ID: 9},
+		{Role: Assistant, Content: "second", ID: 99},
+		{Role: User, Content: "third"},
+	}
+
+	if _, err := cs.SaveSessionMessages(sessionID, seed); err != nil {
+		t.Fatalf("failed to save session messages: %v", err)
+	}
+
+	got, err := cs.GetSessionMessages(sessionID)
+	if err != nil {
+		t.Fatalf("failed to get session messages: %v", err)
+	}
+
+	if len(got) != 3 {
+		t.Fatalf("expected 3 messages, got %d", len(got))
+	}
+
+	for i := range got {
+		expectedID := i + 1
+		if got[i].ID != expectedID {
+			t.Fatalf("expected message #%d to have ID %d, got %d", i, expectedID, got[i].ID)
+		}
 	}
 }
