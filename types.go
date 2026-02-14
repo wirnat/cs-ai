@@ -30,6 +30,37 @@ type Options struct {
 
 	// === Security Options ===
 	SecurityOptions *SecurityOptions // Security configuration
+
+	// === First-turn bootstrap options ===
+	FirstTurnBootstrap *FirstTurnBootstrapOptions // Optional server-side bootstrap intents for first user turn
+}
+
+type BootstrapFailurePolicy string
+
+const (
+	BootstrapFailureBestEffort BootstrapFailurePolicy = "best_effort"
+	BootstrapFailureStrict     BootstrapFailurePolicy = "strict"
+)
+
+type BootstrapIntentCall struct {
+	IntentCode string                 `json:"intent_code"`
+	Params     map[string]interface{} `json:"params,omitempty"`
+}
+
+type BootstrapCompactionOptions struct {
+	MaxDepth        int `json:"max_depth"`
+	MaxArrayItems   int `json:"max_array_items"`
+	MaxObjectKeys   int `json:"max_object_keys"`
+	MaxStringChars  int `json:"max_string_chars"`
+	MaxPayloadBytes int `json:"max_payload_bytes"`
+}
+
+type FirstTurnBootstrapOptions struct {
+	IntentCalls      []BootstrapIntentCall      `json:"intent_calls"`
+	FailurePolicy    BootstrapFailurePolicy     `json:"failure_policy"`
+	ToolCallIDPrefix string                     `json:"tool_call_id_prefix"`
+	RequireSessionID bool                       `json:"require_session_id"`
+	Compaction       BootstrapCompactionOptions `json:"compaction"`
 }
 
 // SecurityOptions holds security configuration

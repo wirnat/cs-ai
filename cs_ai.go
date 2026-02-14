@@ -106,8 +106,62 @@ type CsAI struct {
 	securityManager *SecurityManager
 }
 
-// Exec mengeksekusi pesan ke AI
+// Exec mengeksekusi pesan ke AI menggunakan seluruh intent yang terdaftar.
 func (c *CsAI) Exec(ctx context.Context, sessionID string, userMessage UserMessage, additionalSystemMessage ...string) (Message, error) {
+	return c.exec(ctx, sessionID, userMessage, c.intents, additionalSystemMessage...)
+}
+
+// ExecWithToolCodes mengeksekusi pesan ke AI dengan subset tool yang diizinkan secara runtime.
+// Jika allowedToolCodes nil, semua tool aktif. Jika kosong ([]string{}), semua tool dimatikan.
+func (c *CsAI) ExecWithToolCodes(
+	ctx context.Context,
+	sessionID string,
+	userMessage UserMessage,
+	allowedToolCodes []string,
+	additionalSystemMessage ...string,
+) (Message, error) {
+	runtimeIntents := c.selectRuntimeIntents(allowedToolCodes)
+	return c.exec(ctx, sessionID, userMessage, runtimeIntents, additionalSystemMessage...)
+}
+
+// ExecWithToolCodesAndIntents mengeksekusi pesan ke AI dengan subset tool bawaan
+// yang diizinkan dan tambahan tool runtime tanpa mutasi intent global.
+func (c *CsAI) ExecWithToolCodesAndIntents(
+	ctx context.Context,
+	sessionID string,
+	userMessage UserMessage,
+	allowedToolCodes []string,
+	additionalIntents []Intent,
+	additionalSystemMessage ...string,
+) (Message, error) {
+	runtimeIntents := c.selectRuntimeIntents(allowedToolCodes)
+	runtimeIntents = mergeIntentsByCode(runtimeIntents, additionalIntents)
+	return c.exec(ctx, sessionID, userMessage, runtimeIntents, additionalSystemMessage...)
+}
+
+func (c *CsAI) exec(
+	ctx context.Context,
+	sessionID string,
+	userMessage UserMessage,
+	runtimeIntents []Intent,
+	additionalSystemMessage ...string,
+) (Message, error) {
+	usageAggregate := DeepSeekUsage{}
+	appendUsage := func(msg Message) {
+		if msg.Usage == nil {
+			return
+		}
+		usageAggregate = usageAggregate.Add(*msg.Usage)
+	}
+	withAggregatedUsage := func(msg Message) Message {
+		normalized := usageAggregate.Normalize()
+		if normalized.IsZero() {
+			return msg
+		}
+		msg.AggregatedUsage = &normalized
+		return msg
+	}
+
 	// Security check
 	userID := userMessage.ParticipantName
 	if userID == "" {
@@ -155,6 +209,11 @@ func (c *CsAI) Exec(ctx context.Context, sessionID string, userMessage UserMessa
 	// replace messages dengan hasil yang sudah difilter
 	messages = filteredMessages
 
+	executionState := c.buildIntentExecutionStateWithIntents(runtimeIntents)
+	if err := c.maybeApplyFirstTurnBootstrap(ctx, sessionID, &messages, userMessage, executionState); err != nil {
+		return Message{}, err
+	}
+
 	// tambahkan pesan baru ke message list
 	conversationMessages := Message{
 		Content: userMessage.Message,
@@ -164,10 +223,11 @@ func (c *CsAI) Exec(ctx context.Context, sessionID string, userMessage UserMessa
 	messages.Add(conversationMessages)
 
 	// Kirim request pertama ke AI
-	aiResponse, err := c.Send(messages, additionalSystemMessage...)
+	aiResponse, err := c.sendWithIntents(messages, runtimeIntents, additionalSystemMessage...)
 	if err != nil {
 		return Message{}, err
 	}
+	appendUsage(aiResponse)
 	messages.Add(aiResponse)
 
 	// Cek apakah AI langsung memberikan jawaban tanpa tool_calls
@@ -182,15 +242,16 @@ func (c *CsAI) Exec(ctx context.Context, sessionID string, userMessage UserMessa
 			})
 
 			// Kirim ulang request dengan instruksi format
-			aiResponse, err = c.Send(messages, additionalSystemMessage...)
+			aiResponse, err = c.sendWithIntents(messages, runtimeIntents, additionalSystemMessage...)
 			if err != nil {
 				return Message{}, err
 			}
+			appendUsage(aiResponse)
 			messages.Add(aiResponse)
 		}
 
 		_, _ = c.SaveSessionMessages(sessionID, messages) // simpan percakapan
-		return aiResponse, nil
+		return withAggregatedUsage(aiResponse), nil
 	}
 
 	// ============================== HANDLE TOOL CALLS ==============================
@@ -200,22 +261,6 @@ func (c *CsAI) Exec(ctx context.Context, sessionID string, userMessage UserMessa
 	invalidToolCalls := 0
 	successfulToolCalls := 0
 	maxInvalidToolCalls := 2
-	processor := &DefaultResponseProcessor{}
-
-	// Create tool lookup and definition hash map for cache invalidation
-	toolDefinitionHashes := make(map[string]string)
-	intentsByCode := make(map[string]Intent, len(c.intents))
-	availableTools := make([]string, 0, len(c.intents))
-	for _, intent := range c.intents {
-		intentCode := intent.Code()
-		intentsByCode[intentCode] = intent
-		availableTools = append(availableTools, intentCode)
-
-		if hash, err := generateToolDefinitionHash(intent); err == nil {
-			toolDefinitionHashes[intentCode] = hash
-		}
-	}
-	sort.Strings(availableTools)
 
 	for len(aiResponse.ToolCalls) > 0 {
 		loopCount++
@@ -229,7 +274,7 @@ func (c *CsAI) Exec(ctx context.Context, sessionID string, userMessage UserMessa
 
 		// Proses semua tool calls dalam satu iterasi
 		for _, tool := range aiResponse.ToolCalls {
-			toolDefinitionHash := toolDefinitionHashes[tool.Function.Name]
+			toolDefinitionHash := executionState.ToolDefinitionHashes[tool.Function.Name]
 			cacheKey := ToolCacheKey{
 				FunctionName:       tool.Function.Name,
 				Arguments:          tool.Function.Arguments,
@@ -247,103 +292,24 @@ func (c *CsAI) Exec(ctx context.Context, sessionID string, userMessage UserMessa
 				delete(toolCache, cacheKey)
 			}
 
-			intent, exists := intentsByCode[tool.Function.Name]
-			if !exists {
+			toolResponse, isInvalid, executeErr := c.executeIntentToolCall(
+				ctx,
+				sessionID,
+				userMessage,
+				tool,
+				executionState,
+			)
+			if executeErr != nil {
+				return Message{}, executeErr
+			}
+
+			if isInvalid {
 				invalidToolCalls++
-				unavailableToolResponse := buildToolErrorMessage(
-					tool.Id,
-					"tool_not_found",
-					tool.Function.Name,
-					availableTools,
-				)
-				toolCallResponses[tool.Id] = unavailableToolResponse
-				newMessages.Add(unavailableToolResponse)
-				continue
+			} else {
+				toolCache[cacheKey] = toolResponse
+				successfulToolCalls++
 			}
-
-			paramTemplate := intent.Param()
-			p := paramTemplate
-			err := json.Unmarshal([]byte(tool.Function.Arguments), &p)
-			if err != nil {
-				invalidToolCalls++
-				invalidArgsResponse := buildToolErrorMessage(
-					tool.Id,
-					"invalid_tool_arguments",
-					tool.Function.Name,
-					availableTools,
-				)
-				toolCallResponses[tool.Id] = invalidArgsResponse
-				newMessages.Add(invalidArgsResponse)
-				continue
-			}
-
-			paramMap, ok := p.(map[string]interface{})
-			if !ok {
-				invalidToolCalls++
-				invalidArgsResponse := buildToolErrorMessage(
-					tool.Id,
-					"invalid_tool_argument_format",
-					tool.Function.Name,
-					availableTools,
-				)
-				toolCallResponses[tool.Id] = invalidArgsResponse
-				newMessages.Add(invalidArgsResponse)
-				continue
-			}
-
-			paramMap, err = normalizeToolArguments(paramTemplate, paramMap)
-			if err != nil {
-				invalidToolCalls++
-				invalidArgsResponse := buildToolErrorMessage(
-					tool.Id,
-					"invalid_tool_argument_type",
-					tool.Function.Name,
-					availableTools,
-				)
-				toolCallResponses[tool.Id] = invalidArgsResponse
-				newMessages.Add(invalidArgsResponse)
-				continue
-			}
-
-			// Create middleware context
-			middlewareCtx := &MiddlewareContext{
-				SessionID:       sessionID,
-				IntentCode:      intent.Code(),
-				UserMessage:     userMessage,
-				Parameters:      paramMap,
-				StartTime:       time.Now(),
-				Metadata:        make(map[string]interface{}),
-				PreviousResults: make([]interface{}, 0),
-			}
-
-			// Execute middleware chain with intent handler as final handler
-			finalHandler := func(ctx context.Context, mctx *MiddlewareContext) (interface{}, error) {
-				return intent.Handle(ctx, mctx.Parameters)
-			}
-
-			data, err := c.middlewareChain.Execute(ctx, middlewareCtx, finalHandler)
-			if err != nil {
-				return Message{}, err
-			}
-
-			// Validasi response sesuai dengan parameter
-			if err := validateResponse(data, paramMap); err != nil {
-				return Message{}, fmt.Errorf("invalid response for parameters: %v", err)
-			}
-
-			processedContent, err := processor.Process(data)
-			if err != nil {
-				return Message{}, fmt.Errorf("failed to process tool response: %v", err)
-			}
-
-			toolResponse := Message{
-				Content:    processedContent,
-				Role:       Tool,
-				ToolCallID: tool.Id,
-			}
-			toolCache[cacheKey] = toolResponse
 			toolCallResponses[tool.Id] = toolResponse
-			successfulToolCalls++
 			newMessages.Add(toolResponse)
 		}
 
@@ -355,7 +321,7 @@ func (c *CsAI) Exec(ctx context.Context, sessionID string, userMessage UserMessa
 					tool.Id,
 					"tool_call_unhandled",
 					tool.Function.Name,
-					availableTools,
+					executionState.AvailableTools,
 				)
 				toolCallResponses[tool.Id] = unhandledToolResponse
 				newMessages.Add(unhandledToolResponse)
@@ -369,15 +335,17 @@ func (c *CsAI) Exec(ctx context.Context, sessionID string, userMessage UserMessa
 		messages.Add(newMessages...)
 		if invalidToolCalls >= maxInvalidToolCalls && successfulToolCalls == 0 {
 			safeResponse := buildToolSafetyFallbackMessage(userMessage.ParticipantName)
+			safeResponse = withAggregatedUsage(safeResponse)
 			messages.Add(safeResponse)
 			_, _ = c.SaveSessionMessages(sessionID, messages)
 			return safeResponse, nil
 		}
 
-		aiResponse, err = c.Send(messages, additionalSystemMessage...)
+		aiResponse, err = c.sendWithIntents(messages, runtimeIntents, additionalSystemMessage...)
 		if err != nil {
 			return Message{}, err
 		}
+		appendUsage(aiResponse)
 		messages.Add(aiResponse)
 
 		if aiResponse.Role == Assistant && len(aiResponse.ToolCalls) == 0 {
@@ -392,6 +360,7 @@ func (c *CsAI) Exec(ctx context.Context, sessionID string, userMessage UserMessa
 
 	if invalidToolCalls > 0 && successfulToolCalls == 0 && aiResponse.Role == Assistant && len(aiResponse.ToolCalls) == 0 {
 		safeResponse := buildToolSafetyFallbackMessage(userMessage.ParticipantName)
+		safeResponse = withAggregatedUsage(safeResponse)
 		messages.Add(safeResponse)
 		_, _ = c.SaveSessionMessages(sessionID, messages)
 		return safeResponse, nil
@@ -410,17 +379,18 @@ func (c *CsAI) Exec(ctx context.Context, sessionID string, userMessage UserMessa
 		})
 
 		// Kirim ulang request dengan instruksi format
-		aiResponse, err = c.Send(messages, additionalSystemMessage...)
+		aiResponse, err = c.sendWithIntents(messages, runtimeIntents, additionalSystemMessage...)
 		if err != nil {
 			return Message{}, err
 		}
+		appendUsage(aiResponse)
 		messages.Add(aiResponse)
 
 		// Simpan ulang percakapan setelah format diperbaiki
 		_, _ = c.SaveSessionMessages(sessionID, messages)
 	}
 
-	return aiResponse, nil
+	return withAggregatedUsage(aiResponse), nil
 }
 
 // Report melaporkan sesi chat ketika terjadi percakapan diluar konteks
@@ -435,8 +405,12 @@ func (c *CsAI) Report(sessionID string) error {
 }
 
 func (c *CsAI) Send(messages Messages, additionalSystemMessage ...string) (content Message, err error) {
+	return c.sendWithIntents(messages, c.intents, additionalSystemMessage...)
+}
+
+func (c *CsAI) sendWithIntents(messages Messages, runtimeIntents []Intent, additionalSystemMessage ...string) (content Message, err error) {
 	// messages dari setup model
-	systemMessage := c.getModelMessage(additionalSystemMessage...)
+	systemMessage := c.getModelMessageWithIntents(runtimeIntents, additionalSystemMessage...)
 
 	var roleMessage []map[string]interface{}
 	//===============================USER MESSAGE=================================
@@ -480,13 +454,13 @@ func (c *CsAI) Send(messages Messages, additionalSystemMessage ...string) (conte
 		reqBody["presence_penalty"] = c.options.PresencePenalty
 	}
 
-	if !c.options.UseTool {
+	if !c.options.UseTool || len(runtimeIntents) == 0 {
 		reqBody["tool_choice"] = "none"
 	}
 
 	//===============================ADD INTENT =================================
 	var function []map[string]interface{}
-	for _, intent := range c.intents {
+	for _, intent := range runtimeIntents {
 		param, err2 := convertParam(intent.Param())
 		if err2 != nil {
 			return Message{}, err2
@@ -666,7 +640,76 @@ func (c *CsAI) containsIntent(i Intent) bool {
 	return false
 }
 
+func (c *CsAI) selectRuntimeIntents(allowedToolCodes []string) []Intent {
+	if allowedToolCodes == nil {
+		result := make([]Intent, 0, len(c.intents))
+		result = append(result, c.intents...)
+		return result
+	}
+
+	if len(allowedToolCodes) == 0 {
+		return []Intent{}
+	}
+
+	allowedSet := make(map[string]struct{}, len(allowedToolCodes))
+	for _, code := range allowedToolCodes {
+		normalized := strings.ToLower(strings.TrimSpace(code))
+		if normalized == "" {
+			continue
+		}
+		allowedSet[normalized] = struct{}{}
+	}
+
+	result := make([]Intent, 0, len(allowedSet))
+	for _, intent := range c.intents {
+		intentCode := strings.ToLower(strings.TrimSpace(intent.Code()))
+		if _, ok := allowedSet[intentCode]; ok {
+			result = append(result, intent)
+		}
+	}
+
+	return result
+}
+
+func mergeIntentsByCode(base []Intent, additional []Intent) []Intent {
+	if len(additional) == 0 {
+		result := make([]Intent, 0, len(base))
+		result = append(result, base...)
+		return result
+	}
+
+	seenCodes := make(map[string]struct{}, len(base)+len(additional))
+	result := make([]Intent, 0, len(base)+len(additional))
+
+	for _, intent := range base {
+		code := strings.ToLower(strings.TrimSpace(intent.Code()))
+		if code == "" {
+			continue
+		}
+		seenCodes[code] = struct{}{}
+		result = append(result, intent)
+	}
+
+	for _, intent := range additional {
+		code := strings.ToLower(strings.TrimSpace(intent.Code()))
+		if code == "" {
+			continue
+		}
+		if _, exists := seenCodes[code]; exists {
+			continue
+		}
+		seenCodes[code] = struct{}{}
+		result = append(result, intent)
+	}
+
+	return result
+}
+
 func (c *CsAI) getModelMessage(additionalSystemMessage ...string) (m Messages) {
+	return c.getModelMessageWithIntents(c.intents, additionalSystemMessage...)
+}
+
+func (c *CsAI) getModelMessageWithIntents(runtimeIntents []Intent, additionalSystemMessage ...string) (m Messages) {
 	m = make(Messages, 0)
 
 	for _, s := range c.Model.Train() {
@@ -683,9 +726,9 @@ func (c *CsAI) getModelMessage(additionalSystemMessage ...string) (m Messages) {
 		})
 	}
 
-	if len(c.intents) > 0 {
-		toolNames := make([]string, 0, len(c.intents))
-		for _, intent := range c.intents {
+	if len(runtimeIntents) > 0 {
+		toolNames := make([]string, 0, len(runtimeIntents))
+		for _, intent := range runtimeIntents {
 			toolNames = append(toolNames, intent.Code())
 		}
 		sort.Strings(toolNames)
@@ -733,7 +776,7 @@ func buildToolErrorMessage(toolCallID string, errorCode string, requestedTool st
 
 func buildToolSafetyFallbackMessage(participantName string) Message {
 	return Message{
-		Content: "Maaf, saya tidak dapat melanjutkan karena ada ketidaksesuaian pemanggilan tool internal. Silakan coba lagi.",
+		Content: "Mohon ditunggu ya kak",
 		Name:    participantName,
 		Role:    Assistant,
 	}
