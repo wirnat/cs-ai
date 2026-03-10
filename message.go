@@ -171,6 +171,80 @@ func MessageFromMap(result map[string]interface{}) (content Message, err error) 
 	return
 }
 
+func MessageFromResponsesMap(result map[string]interface{}) (Message, error) {
+	content := Message{
+		Role: Assistant,
+	}
+	if modelName, ok := result["model"].(string); ok {
+		content.Model = strings.TrimSpace(modelName)
+	}
+	content.Usage = parseResponsesUsage(result["usage"])
+
+	var texts []string
+	if directText, ok := result["output_text"].(string); ok {
+		directText = strings.TrimSpace(directText)
+		if directText != "" {
+			texts = append(texts, directText)
+		}
+	}
+
+	rawOutput, _ := result["output"].([]interface{})
+	for idx, item := range rawOutput {
+		entry, ok := item.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		entryType, _ := entry["type"].(string)
+		switch entryType {
+		case "message":
+			if msgText := extractResponseMessageText(entry); msgText != "" {
+				texts = append(texts, msgText)
+			}
+		case "function_call":
+			toolCall := ToolCall{
+				Index: idx,
+				Id:    firstNonEmptyString(toString(entry["id"]), toString(entry["call_id"]), randomID("tool")),
+				Type:  "function",
+			}
+			toolCall.Function.Name = firstNonEmptyString(toString(entry["name"]), toString(entry["function"]))
+			toolCall.Function.Arguments = toString(entry["arguments"])
+			if toolCall.Function.Name != "" {
+				content.ToolCalls = append(content.ToolCalls, toolCall)
+			}
+		}
+	}
+
+	if len(texts) > 0 {
+		content.Content = strings.Join(texts, "\n")
+	}
+	return content, nil
+}
+
+func extractResponseMessageText(entry map[string]interface{}) string {
+	var lines []string
+
+	contents, _ := entry["content"].([]interface{})
+	for _, c := range contents {
+		item, ok := c.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		ctype, _ := item["type"].(string)
+		if ctype == "output_text" || ctype == "text" {
+			if text := strings.TrimSpace(toString(item["text"])); text != "" {
+				lines = append(lines, text)
+			}
+		}
+	}
+
+	if len(lines) == 0 {
+		if text := strings.TrimSpace(toString(entry["text"])); text != "" {
+			lines = append(lines, text)
+		}
+	}
+	return strings.Join(lines, "\n")
+}
+
 func (m Message) MessageToMap() (map[string]interface{}, error) {
 	// Konversi struct Message ke JSON string
 	jsonBytes, err := json.Marshal(m)
@@ -223,6 +297,41 @@ func parseDeepSeekUsage(raw interface{}) *DeepSeekUsage {
 		return nil
 	}
 	return &normalized
+}
+
+func parseResponsesUsage(raw interface{}) *DeepSeekUsage {
+	usageMap, ok := raw.(map[string]interface{})
+	if !ok || usageMap == nil {
+		return nil
+	}
+
+	usage := DeepSeekUsage{
+		PromptTokens:     parseUsageInt64(usageMap["input_tokens"]),
+		CompletionTokens: parseUsageInt64(usageMap["output_tokens"]),
+		TotalTokens:      parseUsageInt64(usageMap["total_tokens"]),
+	}
+	if usage.PromptTokens == 0 {
+		usage.PromptTokens = parseUsageInt64(usageMap["prompt_tokens"])
+	}
+	if usage.CompletionTokens == 0 {
+		usage.CompletionTokens = parseUsageInt64(usageMap["completion_tokens"])
+	}
+
+	normalized := usage.Normalize()
+	if normalized.IsZero() {
+		return nil
+	}
+	return &normalized
+}
+
+func firstNonEmptyString(candidates ...string) string {
+	for _, item := range candidates {
+		trimmed := strings.TrimSpace(item)
+		if trimmed != "" {
+			return trimmed
+		}
+	}
+	return ""
 }
 
 func parseUsageInt64(raw interface{}) int64 {

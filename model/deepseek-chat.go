@@ -19,6 +19,14 @@ func (d *deepSeekChat) ApiURL() string {
 	return "https://api.deepseek.com/v1/chat/completions"
 }
 
+func (d *deepSeekChat) ProviderName() string {
+	return "deepseek"
+}
+
+func (d *deepSeekChat) APIMode() string {
+	return "chat-completions"
+}
+
 func (d *deepSeekChat) Train() []string {
 	t := []string{
 		"Kamu adalah Customer service AI yang harus berbicara secara natural dan menggunakan bahasa sehari-hari, termasuk singkatan jika sesuai, tetapi tetap sopan dan profesional. Namum jangan berikan pengguna tau kalau anda adalah AI.",
@@ -34,6 +42,6 @@ func (d *deepSeekChat) Train() []string {
 		"biasakan membaca singkatan seperti kk (kakak), ok, dan singkatan lumrah lainnya",
 		"**Pastikan tool yg required harus diberikan** oleh customer sebelum melakukan langkah selanjutnya",
 	}
-	
+
 	return t
 }

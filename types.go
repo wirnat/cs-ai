@@ -1,6 +1,7 @@
 package cs_ai
 
 import (
+	"context"
 	"encoding/json"
 	"time"
 
@@ -33,6 +34,10 @@ type Options struct {
 
 	// === First-turn bootstrap options ===
 	FirstTurnBootstrap *FirstTurnBootstrapOptions // Optional server-side bootstrap intents for first user turn
+
+	// === Auth & Model Failover ===
+	AuthManager    AuthManager // Optional auth resolver (OAuth/profile rotation)
+	ModelFallbacks []Modeler   // Candidate fallback models in order
 }
 
 type BootstrapFailurePolicy string
@@ -112,4 +117,27 @@ type ToolCacheKey struct {
 	FunctionName       string
 	Arguments          string
 	ToolDefinitionHash string // Hash dari tool definition untuk invalidate cache saat tool berubah
+}
+
+type AuthFailureReason string
+
+const (
+	AuthFailureReasonRateLimit AuthFailureReason = "rate_limit"
+	AuthFailureReasonFull      AuthFailureReason = "full"
+	AuthFailureReasonTimeout   AuthFailureReason = "timeout"
+	AuthFailureReasonAuth      AuthFailureReason = "auth"
+	AuthFailureReasonUnknown   AuthFailureReason = "unknown"
+)
+
+type AuthSelection struct {
+	Provider  string
+	ProfileID string
+	Token     string
+}
+
+// AuthManager mengelola pemilihan auth profile/token per provider.
+type AuthManager interface {
+	ResolveAuth(ctx context.Context, sessionID string, provider string) (*AuthSelection, error)
+	MarkSuccess(ctx context.Context, sessionID string, provider string, profileID string) error
+	MarkFailure(ctx context.Context, sessionID string, provider string, profileID string, reason AuthFailureReason) error
 }

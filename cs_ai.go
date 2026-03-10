@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
-	"net/http"
 	"sort"
 	"strings"
 	"time"
@@ -223,7 +222,7 @@ func (c *CsAI) exec(
 	messages.Add(conversationMessages)
 
 	// Kirim request pertama ke AI
-	aiResponse, err := c.sendWithIntents(messages, runtimeIntents, additionalSystemMessage...)
+	aiResponse, err := c.sendWithIntentsForSession(ctx, sessionID, messages, runtimeIntents, additionalSystemMessage...)
 	if err != nil {
 		return Message{}, err
 	}
@@ -242,7 +241,7 @@ func (c *CsAI) exec(
 			})
 
 			// Kirim ulang request dengan instruksi format
-			aiResponse, err = c.sendWithIntents(messages, runtimeIntents, additionalSystemMessage...)
+			aiResponse, err = c.sendWithIntentsForSession(ctx, sessionID, messages, runtimeIntents, additionalSystemMessage...)
 			if err != nil {
 				return Message{}, err
 			}
@@ -341,7 +340,7 @@ func (c *CsAI) exec(
 			return safeResponse, nil
 		}
 
-		aiResponse, err = c.sendWithIntents(messages, runtimeIntents, additionalSystemMessage...)
+		aiResponse, err = c.sendWithIntentsForSession(ctx, sessionID, messages, runtimeIntents, additionalSystemMessage...)
 		if err != nil {
 			return Message{}, err
 		}
@@ -379,7 +378,7 @@ func (c *CsAI) exec(
 		})
 
 		// Kirim ulang request dengan instruksi format
-		aiResponse, err = c.sendWithIntents(messages, runtimeIntents, additionalSystemMessage...)
+		aiResponse, err = c.sendWithIntentsForSession(ctx, sessionID, messages, runtimeIntents, additionalSystemMessage...)
 		if err != nil {
 			return Message{}, err
 		}
@@ -405,10 +404,20 @@ func (c *CsAI) Report(sessionID string) error {
 }
 
 func (c *CsAI) Send(messages Messages, additionalSystemMessage ...string) (content Message, err error) {
-	return c.sendWithIntents(messages, c.intents, additionalSystemMessage...)
+	return c.sendWithIntentsForSession(context.Background(), "", messages, c.intents, additionalSystemMessage...)
 }
 
 func (c *CsAI) sendWithIntents(messages Messages, runtimeIntents []Intent, additionalSystemMessage ...string) (content Message, err error) {
+	return c.sendWithIntentsForSession(context.Background(), "", messages, runtimeIntents, additionalSystemMessage...)
+}
+
+func (c *CsAI) sendWithIntentsForSession(
+	ctx context.Context,
+	sessionID string,
+	messages Messages,
+	runtimeIntents []Intent,
+	additionalSystemMessage ...string,
+) (content Message, err error) {
 	// messages dari setup model
 	systemMessage := c.getModelMessageWithIntents(runtimeIntents, additionalSystemMessage...)
 
@@ -421,41 +430,6 @@ func (c *CsAI) sendWithIntents(messages Messages, runtimeIntents []Intent, addit
 			return Message{}, err
 		}
 		roleMessage = append(roleMessage, msMap)
-	}
-
-	//===============================CALL API=================================
-	reqBody := map[string]interface{}{
-		"model":             c.Model.ModelName(),
-		"messages":          roleMessage,
-		"frequency_penalty": 0.0,
-		"max_tokens":        1200,
-		"presence_penalty":  -1.5,
-		"stop":              nil,
-		"stream":            false,
-		"stream_options":    nil,
-		// Use configurable temperature and top_p if set, else fallback to defaults
-		"temperature":  0.2,
-		"top_p":        0.7,
-		"tools":        nil,
-		"tool_choice":  "auto",
-		"logprobs":     false,
-		"top_logprobs": nil,
-	}
-	if c.options.Temperature != 0 {
-		reqBody["temperature"] = c.options.Temperature
-	}
-	if c.options.TopP != 0 {
-		reqBody["top_p"] = c.options.TopP
-	}
-	if c.options.FrequencyPenalty != 0 {
-		reqBody["frequency_penalty"] = c.options.FrequencyPenalty
-	}
-	if c.options.PresencePenalty != 0 {
-		reqBody["presence_penalty"] = c.options.PresencePenalty
-	}
-
-	if !c.options.UseTool || len(runtimeIntents) == 0 {
-		reqBody["tool_choice"] = "none"
 	}
 
 	//===============================ADD INTENT =================================
@@ -474,23 +448,7 @@ func (c *CsAI) sendWithIntents(messages Messages, runtimeIntents []Intent, addit
 			},
 		})
 	}
-	reqBody["tools"] = function
-
-	//===============================REQUEST=================================
-	result, err := Request(c.Model.ApiURL(), "POST", reqBody, func(request *http.Request) {
-		request.Header.Set("Authorization", "Bearer "+c.ApiKey)
-	})
-	if err != nil {
-		return Message{}, err
-	}
-	content, err = MessageFromMap(result)
-	if err != nil {
-		return Message{}, err
-	}
-
-	messages.Add(content)
-
-	return content, nil
+	return c.sendWithModelCandidates(ctx, sessionID, roleMessage, function)
 }
 
 func (c *CsAI) Add(h Intent) {
