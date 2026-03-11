@@ -52,6 +52,8 @@ type StorageConfig struct {
 	MongoURI        string `json:"mongo_uri,omitempty"`
 	MongoDatabase   string `json:"mongo_database,omitempty"`
 	MongoCollection string `json:"mongo_collection,omitempty"`
+	// Optional: import profiles map from auth-profiles.json on MongoAuthManager init.
+	AuthProfilesImportPath string `json:"auth_profiles_import_path,omitempty"`
 
 	// DynamoDB configuration
 	AWSRegion   string `json:"aws_region,omitempty"`

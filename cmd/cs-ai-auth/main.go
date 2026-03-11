@@ -29,42 +29,31 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Extract global --store-path flag before subcommand handling.
-	storePath := ""
-	args := os.Args[1:]
-	filteredArgs := make([]string, 0, len(args))
-	for i := 0; i < len(args); i++ {
-		if args[i] == "--store-path" && i+1 < len(args) {
-			storePath = args[i+1]
-			i++ // skip value
-			continue
-		}
-		if strings.HasPrefix(args[i], "--store-path=") {
-			storePath = strings.TrimPrefix(args[i], "--store-path=")
-			continue
-		}
-		filteredArgs = append(filteredArgs, args[i])
-	}
-	if len(filteredArgs) == 0 {
+	flags := parseGlobalFlags(os.Args[1:])
+	if len(flags.CommandArgs) == 0 {
 		printUsage()
 		os.Exit(1)
 	}
 
-	var manager *cs_ai.FileAuthManager
-	if strings.TrimSpace(storePath) != "" {
-		manager = cs_ai.NewFileAuthManagerWithPath(storePath)
-	} else {
-		manager = cs_ai.NewFileAuthManager()
+	manager, err := createAuthStore(flags)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "gagal inisialisasi auth store: %v\n", err)
+		os.Exit(1)
 	}
+	defer func() {
+		if closeErr := manager.Close(); closeErr != nil {
+			fmt.Fprintf(os.Stderr, "warning: gagal close auth store: %v\n", closeErr)
+		}
+	}()
 
-	switch filteredArgs[0] {
+	switch flags.CommandArgs[0] {
 	case "login":
-		if err := runLogin(manager, filteredArgs[1:]); err != nil {
+		if err := runLogin(manager, flags.CommandArgs[1:]); err != nil {
 			fmt.Fprintf(os.Stderr, "login failed: %v\n", err)
 			os.Exit(1)
 		}
 	case "profiles":
-		if err := runProfiles(manager, filteredArgs[1:]); err != nil {
+		if err := runProfiles(manager, flags.CommandArgs[1:]); err != nil {
 			fmt.Fprintf(os.Stderr, "profiles command failed: %v\n", err)
 			os.Exit(1)
 		}
@@ -79,7 +68,7 @@ func main() {
 	}
 }
 
-func runLogin(manager *cs_ai.FileAuthManager, args []string) error {
+func runLogin(manager authStore, args []string) error {
 	fs := flag.NewFlagSet("login", flag.ContinueOnError)
 	provider := fs.String("provider", "openai-codex", "provider id")
 	redirectURI := fs.String("redirect-uri", "http://localhost:1455/auth/callback", "oauth redirect uri")
@@ -137,7 +126,7 @@ func runLogin(manager *cs_ai.FileAuthManager, args []string) error {
 	return nil
 }
 
-func runProfiles(manager *cs_ai.FileAuthManager, args []string) error {
+func runProfiles(manager authStore, args []string) error {
 	if len(args) == 0 {
 		return runProfilesList(manager, nil)
 	}
@@ -155,7 +144,7 @@ func runProfiles(manager *cs_ai.FileAuthManager, args []string) error {
 	}
 }
 
-func runProfilesList(manager *cs_ai.FileAuthManager, args []string) error {
+func runProfilesList(manager authStore, args []string) error {
 	fs := flag.NewFlagSet("profiles list", flag.ContinueOnError)
 	provider := fs.String("provider", "", "filter provider")
 	if err := fs.Parse(args); err != nil {
@@ -192,7 +181,7 @@ func runProfilesList(manager *cs_ai.FileAuthManager, args []string) error {
 	return nil
 }
 
-func runProfilesOrderSet(manager *cs_ai.FileAuthManager, args []string) error {
+func runProfilesOrderSet(manager authStore, args []string) error {
 	fs := flag.NewFlagSet("profiles order set", flag.ContinueOnError)
 	provider := fs.String("provider", "openai-codex", "provider id")
 	profilesCSV := fs.String("profiles", "", "comma-separated profile order")
@@ -230,7 +219,7 @@ func runProfilesOrderSet(manager *cs_ai.FileAuthManager, args []string) error {
 	return nil
 }
 
-func runStatus(manager *cs_ai.FileAuthManager) error {
+func runStatus(manager authStore) error {
 	store, err := manager.LoadStore()
 	if err != nil {
 		return err
@@ -306,7 +295,10 @@ func waitForCallbackOrPaste(redirectURI, authURL string) (code string, state str
 		}()
 	}
 
-	_ = openBrowser(authURL)
+	if err := openBrowser(authURL); err != nil {
+		fmt.Printf("Gagal membuka browser otomatis: %v\n", err)
+		fmt.Println("Silakan buka URL login secara manual dari output di atas.")
+	}
 
 	if listenErr == nil {
 		select {
@@ -419,6 +411,10 @@ func printUsage() {
 	fmt.Println("                       (project root = nearest dir with go.mod)")
 	fmt.Println("                       fallback: ~/.cs-ai/auth-profiles.json")
 	fmt.Println("                       env override: CS_AI_AUTH_STORE_PATH")
+	fmt.Println("  --mongo-uri <uri>          gunakan MongoDB untuk auth profile store")
+	fmt.Println("  --mongo-database <name>    default: cs_ai")
+	fmt.Println("  --mongo-collection <name>  default: auth_profiles")
+	fmt.Println("                             env fallback: CS_AI_AUTH_MONGO_*, CS_AI_MONGO_*, MONGODB_*, MONGO_*")
 }
 
 func generateCodeVerifier() (string, error) {
