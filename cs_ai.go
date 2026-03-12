@@ -260,6 +260,11 @@ func (c *CsAI) exec(
 	invalidToolCalls := 0
 	successfulToolCalls := 0
 	maxInvalidToolCalls := 2
+	lastToolCallSignature := ""
+	repeatedNoProgressLoops := 0
+	maxRepeatedNoProgressLoops := 2
+	consecutiveNoProgressLoops := 0
+	maxConsecutiveNoProgressLoops := 3
 
 	for len(aiResponse.ToolCalls) > 0 {
 		loopCount++
@@ -270,6 +275,7 @@ func (c *CsAI) exec(
 
 		newMessages := make(Messages, 0)
 		toolCallResponses := make(map[string]Message)
+		currentToolCallSignature := buildToolCallSignature(aiResponse.ToolCalls)
 
 		// Proses semua tool calls dalam satu iterasi
 		for _, tool := range aiResponse.ToolCalls {
@@ -332,7 +338,34 @@ func (c *CsAI) exec(
 		}
 
 		messages.Add(newMessages...)
+		if toolResponsesIndicateProgress(newMessages) {
+			consecutiveNoProgressLoops = 0
+			repeatedNoProgressLoops = 0
+		} else {
+			consecutiveNoProgressLoops++
+			if currentToolCallSignature != "" && currentToolCallSignature == lastToolCallSignature {
+				repeatedNoProgressLoops++
+			} else {
+				repeatedNoProgressLoops = 1
+			}
+		}
+		lastToolCallSignature = currentToolCallSignature
+
 		if invalidToolCalls >= maxInvalidToolCalls && successfulToolCalls == 0 {
+			safeResponse := buildToolSafetyFallbackMessage(userMessage.ParticipantName)
+			safeResponse = withAggregatedUsage(safeResponse)
+			messages.Add(safeResponse)
+			_, _ = c.SaveSessionMessages(sessionID, messages)
+			return safeResponse, nil
+		}
+		if repeatedNoProgressLoops >= maxRepeatedNoProgressLoops {
+			safeResponse := buildToolSafetyFallbackMessage(userMessage.ParticipantName)
+			safeResponse = withAggregatedUsage(safeResponse)
+			messages.Add(safeResponse)
+			_, _ = c.SaveSessionMessages(sessionID, messages)
+			return safeResponse, nil
+		}
+		if consecutiveNoProgressLoops >= maxConsecutiveNoProgressLoops {
 			safeResponse := buildToolSafetyFallbackMessage(userMessage.ParticipantName)
 			safeResponse = withAggregatedUsage(safeResponse)
 			messages.Add(safeResponse)
@@ -738,6 +771,47 @@ func buildToolSafetyFallbackMessage(participantName string) Message {
 		Name:    participantName,
 		Role:    Assistant,
 	}
+}
+
+func buildToolCallSignature(toolCalls []ToolCall) string {
+	if len(toolCalls) == 0 {
+		return ""
+	}
+
+	parts := make([]string, 0, len(toolCalls))
+	for _, toolCall := range toolCalls {
+		parts = append(parts, fmt.Sprintf("%s::%s", strings.TrimSpace(toolCall.Function.Name), strings.TrimSpace(toolCall.Function.Arguments)))
+	}
+	return strings.Join(parts, "||")
+}
+
+func toolResponsesIndicateProgress(messages []Message) bool {
+	for _, msg := range messages {
+		if msg.Role != Tool {
+			continue
+		}
+		status := extractToolStatus(msg.Content)
+		switch status {
+		case "", "SUCCESS", "CONFIRMATION_REQUIRED", "APPROVAL_REQUIRED":
+			return true
+		}
+	}
+	return false
+}
+
+func extractToolStatus(content string) string {
+	trimmed := strings.TrimSpace(content)
+	if trimmed == "" {
+		return ""
+	}
+
+	var payload map[string]interface{}
+	if err := json.Unmarshal([]byte(trimmed), &payload); err != nil {
+		return ""
+	}
+
+	status, _ := payload["status"].(string)
+	return strings.ToUpper(strings.TrimSpace(status))
 }
 
 // AddMessageToSession adds a message to the session history without triggering LLM or tool call logic.
