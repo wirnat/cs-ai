@@ -235,6 +235,34 @@ func TestExec_FirstTurnBootstrap_BestEffort_PreservesCompleteToolResponses(t *te
 	require.Equal(t, "SUCCESS", payload3["status"])
 }
 
+func TestExtractBootstrapSummary_SemanticSQLOutletRowsBecomesHumanSummary(t *testing.T) {
+	summary := extractBootstrapSummary("semantic_sql_readonly", map[string]interface{}{
+		"tool": "semantic_sql_readonly",
+		"data": map[string]interface{}{
+			"rows": []interface{}{
+				map[string]interface{}{"outlet_name": "Lyndford Kupang Jaya"},
+				map[string]interface{}{"outlet_name": "Lyndford Malang"},
+			},
+		},
+	})
+
+	require.Equal(t, "Outlet yang bisa diakses user: Lyndford Kupang Jaya, Lyndford Malang.", summary)
+}
+
+func TestExtractBootstrapSummary_SemanticSQLOutletRowsIncludesUIDWhenAvailable(t *testing.T) {
+	summary := extractBootstrapSummary("semantic_sql_readonly", map[string]interface{}{
+		"tool": "semantic_sql_readonly",
+		"data": map[string]interface{}{
+			"rows": []interface{}{
+				map[string]interface{}{"outlet_uid": "outlet-1", "outlet_name": "Lyndford Kupang Jaya"},
+				map[string]interface{}{"outlet_uid": "outlet-2", "outlet_name": "Lyndford Malang"},
+			},
+		},
+	})
+
+	require.Equal(t, "Outlet yang bisa diakses user: Lyndford Kupang Jaya (outlet-1), Lyndford Malang (outlet-2).", summary)
+}
+
 func TestExec_FirstTurnBootstrap_StrictMode_NoPartialMutation(t *testing.T) {
 	server, _ := newBootstrapServer(t)
 	defer server.Close()

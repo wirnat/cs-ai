@@ -254,6 +254,9 @@ func (c *CsAI) executeBootstrapCalls(
 
 func extractBootstrapSummary(intentCode string, data interface{}) string {
 	if payload, ok := data.(map[string]interface{}); ok {
+		if summary := extractBootstrapSemanticSQLSummary(payload); summary != "" {
+			return summary
+		}
 		if message, ok := payload["message"].(string); ok {
 			message = strings.TrimSpace(message)
 			if message != "" {
@@ -262,6 +265,51 @@ func extractBootstrapSummary(intentCode string, data interface{}) string {
 		}
 	}
 	return fmt.Sprintf("bootstrap intent %s berhasil", intentCode)
+}
+
+func extractBootstrapSemanticSQLSummary(payload map[string]interface{}) string {
+	if strings.TrimSpace(fmt.Sprint(payload["tool"])) != "semantic_sql_readonly" {
+		return ""
+	}
+
+	dataMap, ok := payload["data"].(map[string]interface{})
+	if !ok {
+		return ""
+	}
+
+	rawRows, ok := dataMap["rows"].([]interface{})
+	if !ok || len(rawRows) == 0 {
+		return ""
+	}
+
+	names := make([]string, 0, len(rawRows))
+	for _, rawRow := range rawRows {
+		row, ok := rawRow.(map[string]interface{})
+		if !ok {
+			continue
+		}
+
+		outletName := strings.TrimSpace(fmt.Sprint(row["outlet_name"]))
+		if outletName == "" || outletName == "<nil>" {
+			continue
+		}
+		outletUID := strings.TrimSpace(fmt.Sprint(row["outlet_uid"]))
+		if outletUID != "" && outletUID != "<nil>" {
+			names = append(names, fmt.Sprintf("%s (%s)", outletName, outletUID))
+			continue
+		}
+		names = append(names, outletName)
+	}
+
+	if len(names) == 0 {
+		return ""
+	}
+
+	if len(names) > 6 {
+		return fmt.Sprintf("Outlet yang bisa diakses user: %s, dan %d outlet lainnya.", strings.Join(names[:6], ", "), len(names)-6)
+	}
+
+	return fmt.Sprintf("Outlet yang bisa diakses user: %s.", strings.Join(names, ", "))
 }
 
 func compactBootstrapData(data interface{}, compaction BootstrapCompactionOptions) interface{} {
