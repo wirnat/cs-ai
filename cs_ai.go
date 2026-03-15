@@ -269,8 +269,11 @@ func (c *CsAI) exec(
 	for len(aiResponse.ToolCalls) > 0 {
 		loopCount++
 		if loopCount > maxLoop {
+			loopFallback := buildToolLoopLimitFallbackMessage(userMessage.ParticipantName, successfulToolCalls > 0)
+			loopFallback = withAggregatedUsage(loopFallback)
+			messages.Add(loopFallback)
 			_, _ = c.SaveSessionMessages(sessionID, messages)
-			return Message{}, fmt.Errorf("max tool-call loop reached (%d)", maxLoop)
+			return loopFallback, nil
 		}
 
 		newMessages := make(Messages, 0)
@@ -359,14 +362,14 @@ func (c *CsAI) exec(
 			return safeResponse, nil
 		}
 		if repeatedNoProgressLoops >= maxRepeatedNoProgressLoops {
-			safeResponse := buildToolSafetyFallbackMessage(userMessage.ParticipantName)
+			safeResponse := buildToolNoProgressFallbackMessage(userMessage.ParticipantName, successfulToolCalls > 0)
 			safeResponse = withAggregatedUsage(safeResponse)
 			messages.Add(safeResponse)
 			_, _ = c.SaveSessionMessages(sessionID, messages)
 			return safeResponse, nil
 		}
 		if consecutiveNoProgressLoops >= maxConsecutiveNoProgressLoops {
-			safeResponse := buildToolSafetyFallbackMessage(userMessage.ParticipantName)
+			safeResponse := buildToolNoProgressFallbackMessage(userMessage.ParticipantName, successfulToolCalls > 0)
 			safeResponse = withAggregatedUsage(safeResponse)
 			messages.Add(safeResponse)
 			_, _ = c.SaveSessionMessages(sessionID, messages)
@@ -768,6 +771,32 @@ func buildToolErrorMessage(toolCallID string, errorCode string, requestedTool st
 func buildToolSafetyFallbackMessage(participantName string) Message {
 	return Message{
 		Content: "Mohon ditunggu ya kak",
+		Name:    participantName,
+		Role:    Assistant,
+	}
+}
+
+func buildToolNoProgressFallbackMessage(participantName string, hasSuccessfulToolCalls bool) Message {
+	if hasSuccessfulToolCalls {
+		return Message{
+			Content: "Saya sudah mendapatkan data utamanya. Saya hentikan iterasi tambahan agar tidak berputar terlalu lama, dan saya pakai hasil terbaik yang sudah terkumpul dulu ya.",
+			Name:    participantName,
+			Role:    Assistant,
+		}
+	}
+	return buildToolSafetyFallbackMessage(participantName)
+}
+
+func buildToolLoopLimitFallbackMessage(participantName string, hasSuccessfulToolCalls bool) Message {
+	if hasSuccessfulToolCalls {
+		return Message{
+			Content: "Saya sudah mendapatkan hasil utamanya, tetapi saya hentikan iterasi tambahan agar analisis tidak berputar terlalu lama. Saya lanjutkan dengan hasil terbaik yang sudah berhasil dikumpulkan dulu ya.",
+			Name:    participantName,
+			Role:    Assistant,
+		}
+	}
+	return Message{
+		Content: "Saya belum bisa memastikan jawabannya sekarang karena percobaan analisis tadi berputar terlalu lama. Saya perlu menyederhanakan pendekatannya dulu agar jawabannya tetap akurat.",
 		Name:    participantName,
 		Role:    Assistant,
 	}

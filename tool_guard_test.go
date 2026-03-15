@@ -75,6 +75,22 @@ func TestBuildToolSafetyFallbackMessage(t *testing.T) {
 	assert.NotEmpty(t, msg.Content)
 }
 
+func TestBuildToolNoProgressFallbackMessageUsesPartialResultCopyWhenProgressExists(t *testing.T) {
+	msg := buildToolNoProgressFallbackMessage("tester", true)
+
+	assert.Equal(t, Assistant, msg.Role)
+	assert.Equal(t, "tester", msg.Name)
+	assert.Contains(t, msg.Content, "hasil terbaik")
+}
+
+func TestBuildToolLoopLimitFallbackMessageAbstainsWhenNoProgressExists(t *testing.T) {
+	msg := buildToolLoopLimitFallbackMessage("tester", false)
+
+	assert.Equal(t, Assistant, msg.Role)
+	assert.Equal(t, "tester", msg.Name)
+	assert.Contains(t, msg.Content, "belum bisa memastikan")
+}
+
 func TestGetModelMessageIncludesWhitelistedTools(t *testing.T) {
 	cs := New("test-key", &guardTestModel{}, Options{})
 	cs.Add(&guardTestIntent{code: "z_tool"})

@@ -31,7 +31,7 @@ func (i *loopingToolIntent) Handle(ctx context.Context, req map[string]interface
 func (i *loopingToolIntent) Description() []string { return []string{"loop tool test intent"} }
 func (i *loopingToolIntent) Param() interface{}    { return nil }
 
-func TestExec_ReturnsErrorWhenToolCallExceedsMaxLoop(t *testing.T) {
+func TestExec_ReturnsFallbackWhenToolCallExceedsMaxLoop(t *testing.T) {
 	callCount := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		callCount++
@@ -71,8 +71,8 @@ func TestExec_ReturnsErrorWhenToolCallExceedsMaxLoop(t *testing.T) {
 		ParticipantName: "tester",
 	})
 
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "max tool-call loop reached (10)")
-	assert.Equal(t, Message{}, resp)
+	require.NoError(t, err)
+	assert.Equal(t, Assistant, resp.Role)
+	assert.Contains(t, resp.Content, "berputar terlalu lama")
 	assert.Equal(t, 11, callCount)
 }
