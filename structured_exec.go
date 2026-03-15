@@ -30,11 +30,13 @@ type StructuredExecResult struct {
 }
 
 type StructuredVisual struct {
-	ID           string                   `json:"id,omitempty"`
-	Kind         string                   `json:"kind,omitempty"`
-	Title        string                   `json:"title,omitempty"`
-	VegaLiteSpec map[string]interface{}   `json:"vega_lite_spec,omitempty"`
-	TableData    []map[string]interface{} `json:"table_data,omitempty"`
+	ID             string                   `json:"id,omitempty"`
+	Kind           string                   `json:"kind,omitempty"`
+	Title          string                   `json:"title,omitempty"`
+	SyncfusionSpec map[string]interface{}   `json:"syncfusion_spec,omitempty"`
+	VegaSpec       map[string]interface{}   `json:"vega_spec,omitempty"`
+	VegaLiteSpec   map[string]interface{}   `json:"vega_lite_spec,omitempty"`
+	TableData      []map[string]interface{} `json:"table_data,omitempty"`
 }
 
 type StructuredCitation struct {
