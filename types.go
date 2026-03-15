@@ -141,3 +141,9 @@ type AuthManager interface {
 	MarkSuccess(ctx context.Context, sessionID string, provider string, profileID string) error
 	MarkFailure(ctx context.Context, sessionID string, provider string, profileID string, reason AuthFailureReason) error
 }
+
+// AuthRateLimitRecorder is an optional extension for auth managers that can
+// persist rate-limit snapshots per profile.
+type AuthRateLimitRecorder interface {
+	RecordRateLimit(ctx context.Context, provider string, profileID string, statusCode int, headers map[string]string) error
+}

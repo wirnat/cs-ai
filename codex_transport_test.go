@@ -134,21 +134,21 @@ func TestBuildCodexTools_NormalizesSchemaForStrictMode(t *testing.T) {
 				"parameters": map[string]interface{}{},
 			},
 		},
-			{
-				"type": "function",
-				"function": map[string]interface{}{
-					"name": "appointment-booking",
-					"parameters": map[string]interface{}{
-						"type": "object",
-						"properties": map[string]map[string]interface{}{
-							"date": {"type": "string"},
-							"time": {"type": "string"},
-							"discount_uids": {"type": "array"},
-						},
-						"required": []string{"date", "time", "extra"},
+		{
+			"type": "function",
+			"function": map[string]interface{}{
+				"name": "appointment-booking",
+				"parameters": map[string]interface{}{
+					"type": "object",
+					"properties": map[string]map[string]interface{}{
+						"date":          {"type": "string"},
+						"time":          {"type": "string"},
+						"discount_uids": {"type": "array"},
 					},
+					"required": []string{"date", "time", "extra"},
 				},
 			},
+		},
 	}
 
 	tools := buildCodexTools(functions)
@@ -261,7 +261,7 @@ func TestRequestDetailed_StreamFailedCodexCreditsMappedToQuota(t *testing.T) {
 	}))
 	defer server.Close()
 
-	_, statusCode, err := RequestDetailed(server.URL, http.MethodPost, map[string]interface{}{
+	_, statusCode, _, err := RequestDetailed(server.URL, http.MethodPost, map[string]interface{}{
 		"model":  "gpt-5.4",
 		"stream": true,
 	}, func(req *http.Request) {})

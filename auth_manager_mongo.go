@@ -279,6 +279,28 @@ func (m *MongoAuthManager) MarkFailure(ctx context.Context, sessionID string, pr
 	})
 }
 
+func (m *MongoAuthManager) RecordRateLimit(ctx context.Context, provider string, profileID string, statusCode int, headers map[string]string) error {
+	_ = ctx
+	if m == nil || strings.TrimSpace(profileID) == "" {
+		return nil
+	}
+	provider = normalizeProviderName(provider)
+	return m.withLockedStore(func(store *AuthProfileStore) (bool, error) {
+		cred, exists := store.Profiles[profileID]
+		if !exists {
+			return false, nil
+		}
+		if provider != "" && normalizeProviderName(cred.Provider) != provider {
+			return false, nil
+		}
+
+		stats := store.UsageStats[profileID]
+		updateProfileRateLimitStats(&stats, statusCode, headers, m.now())
+		store.UsageStats[profileID] = stats
+		return true, nil
+	})
+}
+
 func (m *MongoAuthManager) UpsertOAuthProfile(provider string, input OAuthProfileInput) (string, error) {
 	provider = normalizeProviderName(provider)
 	if provider == "" {

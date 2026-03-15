@@ -60,11 +60,11 @@ func (e *APIRequestError) IsTimeout() bool {
 }
 
 func Request(url string, method string, reqBody map[string]interface{}, setHeader func(*http.Request)) (result map[string]interface{}, err error) {
-	result, _, err = RequestDetailed(url, method, reqBody, setHeader)
+	result, _, _, err = RequestDetailed(url, method, reqBody, setHeader)
 	return result, err
 }
 
-func RequestDetailed(url string, method string, reqBody map[string]interface{}, setHeader func(*http.Request)) (result map[string]interface{}, statusCode int, err error) {
+func RequestDetailed(url string, method string, reqBody map[string]interface{}, setHeader func(*http.Request)) (result map[string]interface{}, statusCode int, responseHeaders map[string]string, err error) {
 	httpLog := GetHTTPLogger()
 	streamRequested := false
 	if rawStream, ok := reqBody["stream"].(bool); ok {
@@ -73,12 +73,12 @@ func RequestDetailed(url string, method string, reqBody map[string]interface{}, 
 
 	jsonData, err := json.MarshalIndent(reqBody, "", "  ")
 	if err != nil {
-		return nil, 0, fmt.Errorf("failed to marshal request body: %v", err)
+		return nil, 0, nil, fmt.Errorf("failed to marshal request body: %v", err)
 	}
 
 	req, err := http.NewRequest(method, url, bytes.NewBuffer(jsonData))
 	if err != nil {
-		return nil, 0, fmt.Errorf("failed to create request: %v", err)
+		return nil, 0, nil, fmt.Errorf("failed to create request: %v", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
 	setHeader(req)
@@ -104,11 +104,15 @@ func RequestDetailed(url string, method string, reqBody map[string]interface{}, 
 	if err != nil {
 		httpLog.LogResponse(0, nil, nil, durationMs, err.Error())
 		httpLog.FlushPair()
-		return nil, 0, &APIRequestError{Err: fmt.Errorf("request failed: %w", err)}
+		return nil, 0, nil, &APIRequestError{Err: fmt.Errorf("request failed: %w", err)}
 	}
 	defer resp.Body.Close()
 
 	statusCode = resp.StatusCode
+	responseHeaders = make(map[string]string, len(resp.Header))
+	for k, v := range resp.Header {
+		responseHeaders[k] = strings.Join(v, ", ")
+	}
 
 	// Stream mode (SSE), used by OpenAI Codex transport on chatgpt.com.
 	if streamRequested && statusCode < 400 {
@@ -119,39 +123,30 @@ func RequestDetailed(url string, method string, reqBody map[string]interface{}, 
 			if readErr != nil {
 				httpLog.LogResponse(statusCode, nil, nil, durationMs, readErr.Error())
 				httpLog.FlushPair()
-				return nil, statusCode, &APIRequestError{StatusCode: statusCode, Err: fmt.Errorf("failed to read response body: %w", readErr)}
+				return nil, statusCode, responseHeaders, &APIRequestError{StatusCode: statusCode, Err: fmt.Errorf("failed to read response body: %w", readErr)}
 			}
 
-			respHeaders := make(map[string]string, len(resp.Header))
-			for k, v := range resp.Header {
-				respHeaders[k] = strings.Join(v, ", ")
-			}
-			httpLog.LogResponse(statusCode, respHeaders, bodyBytes, durationMs, "")
+			httpLog.LogResponse(statusCode, responseHeaders, bodyBytes, durationMs, "")
 			httpLog.FlushPair()
 
 			if len(bodyBytes) > 0 {
 				if unmarshalErr := json.Unmarshal(bodyBytes, &result); unmarshalErr != nil {
-					return nil, statusCode, &APIRequestError{StatusCode: statusCode, Body: string(bodyBytes), Err: fmt.Errorf("failed to parse JSON: %w", unmarshalErr)}
+					return nil, statusCode, responseHeaders, &APIRequestError{StatusCode: statusCode, Body: string(bodyBytes), Err: fmt.Errorf("failed to parse JSON: %w", unmarshalErr)}
 				}
 			}
 			if result == nil {
 				result = map[string]interface{}{}
 			}
-			return result, statusCode, nil
+			return result, statusCode, responseHeaders, nil
 		}
 
 		finalResponse, streamBody, streamErr := parseSSEFinalResponse(resp.Body)
-
-		respHeaders := make(map[string]string, len(resp.Header))
-		for k, v := range resp.Header {
-			respHeaders[k] = strings.Join(v, ", ")
-		}
 
 		errMsg := ""
 		if streamErr != nil {
 			errMsg = streamErr.Error()
 		}
-		httpLog.LogResponse(statusCode, respHeaders, streamBody, durationMs, errMsg)
+		httpLog.LogResponse(statusCode, responseHeaders, streamBody, durationMs, errMsg)
 		httpLog.FlushPair()
 
 		if streamErr != nil {
@@ -174,7 +169,7 @@ func RequestDetailed(url string, method string, reqBody map[string]interface{}, 
 					}
 				}
 			}
-			return nil, errStatus, &APIRequestError{
+			return nil, errStatus, responseHeaders, &APIRequestError{
 				StatusCode: errStatus,
 				Body:       errBody,
 				Err:        streamErr,
@@ -182,27 +177,21 @@ func RequestDetailed(url string, method string, reqBody map[string]interface{}, 
 		}
 
 		fmt.Printf("[cs-ai] <- %d (%dms) stream completed\n", statusCode, durationMs)
-		return finalResponse, statusCode, nil
+		return finalResponse, statusCode, responseHeaders, nil
 	}
 
 	bodyBytes, err := io.ReadAll(resp.Body)
 	if err != nil {
 		httpLog.LogResponse(statusCode, nil, nil, durationMs, err.Error())
 		httpLog.FlushPair()
-		return nil, statusCode, &APIRequestError{StatusCode: statusCode, Err: fmt.Errorf("failed to read response body: %w", err)}
-	}
-
-	// Capture response headers for logging.
-	respHeaders := make(map[string]string, len(resp.Header))
-	for k, v := range resp.Header {
-		respHeaders[k] = strings.Join(v, ", ")
+		return nil, statusCode, responseHeaders, &APIRequestError{StatusCode: statusCode, Err: fmt.Errorf("failed to read response body: %w", err)}
 	}
 
 	errMsg := ""
 	if statusCode >= 400 {
 		errMsg = fmt.Sprintf("HTTP %d", statusCode)
 	}
-	httpLog.LogResponse(statusCode, respHeaders, bodyBytes, durationMs, errMsg)
+	httpLog.LogResponse(statusCode, responseHeaders, bodyBytes, durationMs, errMsg)
 	httpLog.FlushPair()
 
 	// Compact stdout summary.
@@ -211,9 +200,9 @@ func RequestDetailed(url string, method string, reqBody map[string]interface{}, 
 	if len(bodyBytes) > 0 {
 		if err = json.Unmarshal(bodyBytes, &result); err != nil {
 			if statusCode >= 400 {
-				return nil, statusCode, &APIRequestError{StatusCode: statusCode, Body: string(bodyBytes), Err: fmt.Errorf("failed to parse JSON: %w", err)}
+				return nil, statusCode, responseHeaders, &APIRequestError{StatusCode: statusCode, Body: string(bodyBytes), Err: fmt.Errorf("failed to parse JSON: %w", err)}
 			}
-			return nil, statusCode, fmt.Errorf("failed to parse JSON: %v, response: %s", err, string(bodyBytes))
+			return nil, statusCode, responseHeaders, fmt.Errorf("failed to parse JSON: %v, response: %s", err, string(bodyBytes))
 		}
 	}
 
@@ -224,13 +213,13 @@ func RequestDetailed(url string, method string, reqBody map[string]interface{}, 
 				bodyText = string(raw)
 			}
 		}
-		return nil, statusCode, &APIRequestError{StatusCode: statusCode, Body: bodyText}
+		return nil, statusCode, responseHeaders, &APIRequestError{StatusCode: statusCode, Body: bodyText}
 	}
 
 	if result == nil {
 		result = map[string]interface{}{}
 	}
-	return result, statusCode, nil
+	return result, statusCode, responseHeaders, nil
 }
 
 func parseSSEFinalResponse(reader io.Reader) (map[string]interface{}, []byte, error) {

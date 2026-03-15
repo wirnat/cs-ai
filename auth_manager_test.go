@@ -141,3 +141,65 @@ func TestFileAuthManager_SingleProfileDisabledStillResolved(t *testing.T) {
 	require.Equal(t, profileID, selection.ProfileID)
 	require.Equal(t, "token-a", selection.Token)
 }
+
+func TestUpdateProfileRateLimitStats_TracksFiveHourAndWeeklyWindows(t *testing.T) {
+	now := time.Unix(1773137048, 0)
+	stats := ProfileUsageStats{}
+	headers := map[string]string{
+		"X-Codex-Active-Limit":                         "codex",
+		"X-Codex-Plan-Type":                            "plus",
+		"X-Codex-Credits-Has-Credits":                  "False",
+		"X-Codex-Credits-Unlimited":                    "False",
+		"X-Codex-Primary-Window-Minutes":               "300",
+		"X-Codex-Primary-Used-Percent":                 "17",
+		"X-Codex-Primary-Reset-At":                     "1773151806",
+		"X-Codex-Primary-Reset-After-Seconds":          "14758",
+		"X-Codex-Primary-Over-Secondary-Limit-Percent": "0",
+		"X-Codex-Secondary-Window-Minutes":             "10080",
+		"X-Codex-Secondary-Used-Percent":               "7",
+		"X-Codex-Secondary-Reset-At":                   "1773720582",
+		"X-Codex-Secondary-Reset-After-Seconds":        "583535",
+	}
+
+	updateProfileRateLimitStats(&stats, 200, headers, now)
+	require.NotNil(t, stats.RateLimit)
+	require.Equal(t, 200, stats.RateLimit.LastStatusCode)
+	require.Equal(t, "codex", stats.RateLimit.ActiveLimit)
+	require.Equal(t, "plus", stats.RateLimit.PlanType)
+	require.Equal(t, int64(1), stats.RateLimit.FiveHour.RequestCount)
+	require.Equal(t, int64(1), stats.RateLimit.Weekly.RequestCount)
+	require.Equal(t, 300, stats.RateLimit.FiveHour.WindowMinutes)
+	require.Equal(t, 10080, stats.RateLimit.Weekly.WindowMinutes)
+	require.Equal(t, 17, stats.RateLimit.FiveHour.UsedPercent)
+	require.Equal(t, 7, stats.RateLimit.Weekly.UsedPercent)
+	require.Equal(t, int64(1773151806), stats.RateLimit.FiveHour.ResetAt)
+	require.Equal(t, int64(1773720582), stats.RateLimit.Weekly.ResetAt)
+}
+
+func TestUpdateProfileRateLimitStats_ResetsCounterWhenWindowCycleChanges(t *testing.T) {
+	baseTime := time.Unix(1773137048, 0)
+	stats := ProfileUsageStats{}
+
+	headers := map[string]string{
+		"X-Codex-Primary-Window-Minutes":   "300",
+		"X-Codex-Primary-Reset-At":         "1773151806",
+		"X-Codex-Secondary-Window-Minutes": "10080",
+		"X-Codex-Secondary-Reset-At":       "1773720582",
+	}
+
+	updateProfileRateLimitStats(&stats, 200, headers, baseTime)
+	updateProfileRateLimitStats(&stats, 200, headers, baseTime.Add(30*time.Second))
+	require.NotNil(t, stats.RateLimit)
+	require.Equal(t, int64(2), stats.RateLimit.FiveHour.RequestCount)
+	require.Equal(t, int64(2), stats.RateLimit.Weekly.RequestCount)
+
+	nextCycleHeaders := map[string]string{
+		"X-Codex-Primary-Window-Minutes":   "300",
+		"X-Codex-Primary-Reset-At":         "1773169806",
+		"X-Codex-Secondary-Window-Minutes": "10080",
+		"X-Codex-Secondary-Reset-At":       "1774325382",
+	}
+	updateProfileRateLimitStats(&stats, 200, nextCycleHeaders, baseTime.Add(6*time.Hour))
+	require.Equal(t, int64(1), stats.RateLimit.FiveHour.RequestCount)
+	require.Equal(t, int64(1), stats.RateLimit.Weekly.RequestCount)
+}

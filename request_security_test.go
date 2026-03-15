@@ -33,7 +33,7 @@ func TestRequestDetailed_RedactsAuthorizationHeaderInLogs(t *testing.T) {
 	require.NoError(t, err)
 	os.Stdout = w
 
-	_, _, reqErr := RequestDetailed(server.URL, http.MethodPost, map[string]interface{}{"hello": "world"}, func(request *http.Request) {
+	_, _, _, reqErr := RequestDetailed(server.URL, http.MethodPost, map[string]interface{}{"hello": "world"}, func(request *http.Request) {
 		request.Header.Set("Authorization", "Bearer super-secret-token")
 	})
 	require.NoError(t, reqErr)

@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -34,6 +35,31 @@ type ProfileUsageStats struct {
 	ErrorCount     int                       `json:"error_count,omitempty"`
 	FailureCounts  map[AuthFailureReason]int `json:"failure_counts,omitempty"`
 	LastFailureAt  int64                     `json:"last_failure_at,omitempty"`
+	RateLimit      *ProfileRateLimitStats    `json:"rate_limit,omitempty"`
+}
+
+type ProfileRateLimitWindowStats struct {
+	WindowMinutes             int   `json:"window_minutes,omitempty"`
+	UsedPercent               int   `json:"used_percent,omitempty"`
+	OverSecondaryLimitPercent int   `json:"over_secondary_limit_percent,omitempty"`
+	ResetAt                   int64 `json:"reset_at,omitempty"`
+	ResetAfterSeconds         int64 `json:"reset_after_seconds,omitempty"`
+	WindowStart               int64 `json:"window_start,omitempty"`
+	RequestCount              int64 `json:"request_count,omitempty"`
+	UpdatedAt                 int64 `json:"updated_at,omitempty"`
+}
+
+type ProfileRateLimitStats struct {
+	LastStatusCode int   `json:"last_status_code,omitempty"`
+	LastRequestAt  int64 `json:"last_request_at,omitempty"`
+
+	ActiveLimit string `json:"active_limit,omitempty"`
+	PlanType    string `json:"plan_type,omitempty"`
+	HasCredits  string `json:"has_credits,omitempty"`
+	Unlimited   string `json:"unlimited,omitempty"`
+
+	FiveHour ProfileRateLimitWindowStats `json:"five_hour,omitempty"`
+	Weekly   ProfileRateLimitWindowStats `json:"weekly,omitempty"`
 }
 
 type SessionPin struct {
@@ -348,26 +374,26 @@ func (m *FileAuthManager) UpsertOAuthProfile(provider string, input OAuthProfile
 	}
 	profileID := provider + ":" + email
 
-		err := m.withLockedStore(func(store *AuthProfileStore) (bool, error) {
-			store.Profiles[profileID] = AuthProfileCredential{
-				Type:     "oauth",
-				Provider: provider,
-				Access:   strings.TrimSpace(input.Access),
-				Refresh:  strings.TrimSpace(input.Refresh),
-				Expires:  input.Expires,
-				Email:    email,
-			}
-			stats := store.UsageStats[profileID]
-			// Fresh login / token upsert should clear temporary lockouts so the
-			// profile can be retried immediately with the new credential state.
-			stats.CooldownUntil = 0
-			stats.DisabledUntil = 0
-			stats.DisabledReason = ""
-			stats.ErrorCount = 0
-			stats.FailureCounts = map[AuthFailureReason]int{}
-			store.UsageStats[profileID] = stats
-			return true, nil
-		})
+	err := m.withLockedStore(func(store *AuthProfileStore) (bool, error) {
+		store.Profiles[profileID] = AuthProfileCredential{
+			Type:     "oauth",
+			Provider: provider,
+			Access:   strings.TrimSpace(input.Access),
+			Refresh:  strings.TrimSpace(input.Refresh),
+			Expires:  input.Expires,
+			Email:    email,
+		}
+		stats := store.UsageStats[profileID]
+		// Fresh login / token upsert should clear temporary lockouts so the
+		// profile can be retried immediately with the new credential state.
+		stats.CooldownUntil = 0
+		stats.DisabledUntil = 0
+		stats.DisabledReason = ""
+		stats.ErrorCount = 0
+		stats.FailureCounts = map[AuthFailureReason]int{}
+		store.UsageStats[profileID] = stats
+		return true, nil
+	})
 	if err != nil {
 		return "", err
 	}
@@ -736,6 +762,126 @@ func markFailure(store *AuthProfileStore, profileID string, reason AuthFailureRe
 	}
 
 	store.UsageStats[profileID] = stats
+}
+
+func updateProfileRateLimitStats(stats *ProfileUsageStats, statusCode int, headers map[string]string, now time.Time) {
+	if stats == nil {
+		return
+	}
+	if stats.RateLimit == nil {
+		stats.RateLimit = &ProfileRateLimitStats{}
+	}
+
+	rateLimit := stats.RateLimit
+	nowMs := now.UnixMilli()
+	rateLimit.LastStatusCode = statusCode
+	rateLimit.LastRequestAt = nowMs
+
+	if value := lookupHeaderValue(headers, "X-Codex-Active-Limit"); value != "" {
+		rateLimit.ActiveLimit = value
+	}
+	if value := lookupHeaderValue(headers, "X-Codex-Plan-Type"); value != "" {
+		rateLimit.PlanType = value
+	}
+	if value := lookupHeaderValue(headers, "X-Codex-Credits-Has-Credits"); value != "" {
+		rateLimit.HasCredits = value
+	}
+	if value := lookupHeaderValue(headers, "X-Codex-Credits-Unlimited"); value != "" {
+		rateLimit.Unlimited = value
+	}
+
+	updateRateLimitWindowStats(&rateLimit.FiveHour, headers, "X-Codex-Primary-", 300, nowMs)
+	updateRateLimitWindowStats(&rateLimit.Weekly, headers, "X-Codex-Secondary-", 10080, nowMs)
+}
+
+func updateRateLimitWindowStats(
+	window *ProfileRateLimitWindowStats,
+	headers map[string]string,
+	headerPrefix string,
+	fallbackWindowMinutes int,
+	nowMs int64,
+) {
+	if window == nil {
+		return
+	}
+
+	if parsed, ok := parseHeaderInt(headers, headerPrefix+"Window-Minutes"); ok && parsed > 0 {
+		window.WindowMinutes = parsed
+	}
+	if window.WindowMinutes <= 0 {
+		window.WindowMinutes = fallbackWindowMinutes
+	}
+
+	if parsed, ok := parseHeaderInt(headers, headerPrefix+"Used-Percent"); ok {
+		window.UsedPercent = parsed
+	}
+	if parsed, ok := parseHeaderInt(headers, headerPrefix+"Over-Secondary-Limit-Percent"); ok {
+		window.OverSecondaryLimitPercent = parsed
+	}
+	if parsed, ok := parseHeaderInt64(headers, headerPrefix+"Reset-After-Seconds"); ok {
+		window.ResetAfterSeconds = parsed
+	}
+
+	var resetAt int64
+	hasResetAt := false
+	if parsed, ok := parseHeaderInt64(headers, headerPrefix+"Reset-At"); ok {
+		resetAt = parsed
+		hasResetAt = true
+	}
+
+	windowDurationMs := int64(time.Duration(window.WindowMinutes) * time.Minute / time.Millisecond)
+	if windowDurationMs <= 0 {
+		windowDurationMs = int64(time.Duration(fallbackWindowMinutes) * time.Minute / time.Millisecond)
+	}
+
+	if hasResetAt {
+		if window.ResetAt != resetAt {
+			window.RequestCount = 0
+			if windowDurationMs > 0 {
+				window.WindowStart = (resetAt * 1000) - windowDurationMs
+			}
+		}
+		window.ResetAt = resetAt
+	} else if window.WindowStart == 0 || (windowDurationMs > 0 && nowMs-window.WindowStart >= windowDurationMs) {
+		window.WindowStart = nowMs
+		window.RequestCount = 0
+		window.ResetAt = 0
+	}
+
+	window.RequestCount++
+	window.UpdatedAt = nowMs
+}
+
+func lookupHeaderValue(headers map[string]string, target string) string {
+	if len(headers) == 0 || strings.TrimSpace(target) == "" {
+		return ""
+	}
+	for key, value := range headers {
+		if strings.EqualFold(strings.TrimSpace(key), target) {
+			return strings.TrimSpace(value)
+		}
+	}
+	return ""
+}
+
+func parseHeaderInt(headers map[string]string, key string) (int, bool) {
+	parsed, ok := parseHeaderInt64(headers, key)
+	if !ok {
+		return 0, false
+	}
+	return int(parsed), true
+}
+
+func parseHeaderInt64(headers map[string]string, key string) (int64, bool) {
+	raw := strings.TrimSpace(lookupHeaderValue(headers, key))
+	if raw == "" {
+		return 0, false
+	}
+	parsed, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil {
+		return 0, false
+	}
+	return parsed, true
 }
 
 func calculateCooldownBackoff(errorCount int) time.Duration {

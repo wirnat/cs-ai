@@ -181,7 +181,7 @@ func (c *CsAI) attemptModelRequest(
 	}
 
 	reqBody := buildRequestBodyByAPIMode(apiMode, modelCandidate.ModelName(), roleMessage, function, c.options)
-	result, _, requestErr := RequestDetailed(modelCandidate.ApiURL(), "POST", reqBody, func(request *http.Request) {
+	result, statusCode, responseHeaders, requestErr := RequestDetailed(modelCandidate.ApiURL(), "POST", reqBody, func(request *http.Request) {
 		request.Header.Set("Authorization", "Bearer "+authToken)
 		if apiMode == APIModeOpenAICodexResponses {
 			// ChatGPT Codex backend requires account routing metadata in headers.
@@ -192,6 +192,7 @@ func (c *CsAI) attemptModelRequest(
 			request.Header.Set("originator", "pi")
 		}
 	})
+	c.recordRateLimitSnapshot(ctx, provider, profileID, statusCode, responseHeaders)
 	if requestErr != nil {
 		reason := classifyFailoverReason(requestErr)
 		if c.options.AuthManager != nil && profileID != "" {
@@ -220,6 +221,17 @@ func (c *CsAI) attemptModelRequest(
 	}
 
 	return content, nil
+}
+
+func (c *CsAI) recordRateLimitSnapshot(ctx context.Context, provider string, profileID string, statusCode int, headers map[string]string) {
+	if c == nil || c.options.AuthManager == nil || strings.TrimSpace(profileID) == "" {
+		return
+	}
+	recorder, ok := c.options.AuthManager.(AuthRateLimitRecorder)
+	if !ok {
+		return
+	}
+	_ = recorder.RecordRateLimit(ctx, provider, profileID, statusCode, headers)
 }
 
 func buildRequestBodyByAPIMode(
