@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
+	"regexp"
 	"strings"
 )
 
@@ -166,6 +167,9 @@ func MessageFromMap(result map[string]interface{}) (content Message, err error) 
 	if modelName, ok := result["model"].(string); ok {
 		content.Model = strings.TrimSpace(modelName)
 	}
+	if content.Role == Assistant {
+		content.Content = sanitizeAssistantFinalMessage(content.Content)
+	}
 	content.Usage = parseDeepSeekUsage(result["usage"])
 
 	return
@@ -181,12 +185,7 @@ func MessageFromResponsesMap(result map[string]interface{}) (Message, error) {
 	content.Usage = parseResponsesUsage(result["usage"])
 
 	var texts []string
-	if directText, ok := result["output_text"].(string); ok {
-		directText = strings.TrimSpace(directText)
-		if directText != "" {
-			texts = append(texts, directText)
-		}
-	}
+	directText := strings.TrimSpace(toString(result["output_text"]))
 
 	rawOutput, _ := result["output"].([]interface{})
 	for idx, item := range rawOutput {
@@ -194,9 +193,13 @@ func MessageFromResponsesMap(result map[string]interface{}) (Message, error) {
 		if !ok {
 			continue
 		}
-		entryType, _ := entry["type"].(string)
+		entryType := strings.ToLower(strings.TrimSpace(toString(entry["type"])))
 		switch entryType {
 		case "message":
+			role := strings.ToLower(strings.TrimSpace(toString(entry["role"])))
+			if role != "" && role != "assistant" {
+				continue
+			}
 			if msgText := extractResponseMessageText(entry); msgText != "" {
 				texts = append(texts, msgText)
 			}
@@ -214,8 +217,11 @@ func MessageFromResponsesMap(result map[string]interface{}) (Message, error) {
 		}
 	}
 
+	if len(texts) == 0 && directText != "" {
+		texts = append(texts, directText)
+	}
 	if len(texts) > 0 {
-		content.Content = strings.Join(texts, "\n")
+		content.Content = sanitizeAssistantFinalMessage(strings.Join(texts, "\n"))
 	}
 	return content, nil
 }
@@ -229,7 +235,7 @@ func extractResponseMessageText(entry map[string]interface{}) string {
 		if !ok {
 			continue
 		}
-		ctype, _ := item["type"].(string)
+		ctype := strings.ToLower(strings.TrimSpace(toString(item["type"])))
 		if ctype == "output_text" || ctype == "text" {
 			if text := strings.TrimSpace(toString(item["text"])); text != "" {
 				lines = append(lines, text)
@@ -242,7 +248,7 @@ func extractResponseMessageText(entry map[string]interface{}) string {
 			lines = append(lines, text)
 		}
 	}
-	return strings.Join(lines, "\n")
+	return sanitizeAssistantFinalMessage(strings.Join(lines, "\n"))
 }
 
 func (m Message) MessageToMap() (map[string]interface{}, error) {
@@ -297,6 +303,22 @@ func parseDeepSeekUsage(raw interface{}) *DeepSeekUsage {
 		return nil
 	}
 	return &normalized
+}
+
+var assistantThinkingTagPattern = regexp.MustCompile(`(?is)<\s*(?:think|thinking|reasoning|analysis)\b[^>]*>.*?<\s*/\s*(?:think|thinking|reasoning|analysis)\s*>`)
+
+func sanitizeAssistantFinalMessage(raw string) string {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return ""
+	}
+
+	cleaned := assistantThinkingTagPattern.ReplaceAllString(trimmed, "")
+	cleaned = strings.TrimSpace(cleaned)
+	if cleaned == "" {
+		return trimmed
+	}
+	return cleaned
 }
 
 func parseResponsesUsage(raw interface{}) *DeepSeekUsage {
