@@ -142,6 +142,111 @@ func TestFileAuthManager_SingleProfileDisabledStillResolved(t *testing.T) {
 	require.Equal(t, "token-a", selection.Token)
 }
 
+func TestFileAuthManager_ResolveAuth_SetsRefreshFailedFlagOnRefreshError(t *testing.T) {
+	manager := NewFileAuthManagerWithPath(filepath.Join(t.TempDir(), "auth-profiles.json"))
+
+	profileID, err := manager.UpsertOAuthProfile("openai-codex", OAuthProfileInput{
+		Access:  "token-a",
+		Refresh: "refresh-a",
+		Expires: time.Now().Add(-1 * time.Hour).UnixMilli(),
+		Email:   "a@example.com",
+	})
+	require.NoError(t, err)
+	require.NotEmpty(t, profileID)
+
+	manager.refreshFunc = func(_ context.Context, _ AuthProfileCredential) (AuthProfileCredential, error) {
+		return AuthProfileCredential{}, context.DeadlineExceeded
+	}
+
+	selection, err := manager.ResolveAuth(context.Background(), "session-refresh-fail", "openai-codex")
+	require.NoError(t, err)
+	require.NotNil(t, selection)
+	require.Equal(t, profileID, selection.ProfileID)
+
+	store, err := manager.LoadStore()
+	require.NoError(t, err)
+	cred, ok := store.Profiles[profileID]
+	require.True(t, ok)
+	require.True(t, cred.RefreshFailed)
+}
+
+func TestFileAuthManager_ResolveAuth_ClearsRefreshFailedFlagOnRefreshSuccess(t *testing.T) {
+	manager := NewFileAuthManagerWithPath(filepath.Join(t.TempDir(), "auth-profiles.json"))
+
+	profileID, err := manager.UpsertOAuthProfile("openai-codex", OAuthProfileInput{
+		Access:  "token-a",
+		Refresh: "refresh-a",
+		Expires: time.Now().Add(-1 * time.Hour).UnixMilli(),
+		Email:   "a@example.com",
+	})
+	require.NoError(t, err)
+	require.NotEmpty(t, profileID)
+
+	manager.refreshFunc = func(_ context.Context, _ AuthProfileCredential) (AuthProfileCredential, error) {
+		return AuthProfileCredential{}, context.DeadlineExceeded
+	}
+	_, err = manager.ResolveAuth(context.Background(), "session-refresh-fail", "openai-codex")
+	require.NoError(t, err)
+
+	manager.refreshFunc = func(_ context.Context, profile AuthProfileCredential) (AuthProfileCredential, error) {
+		profile.Access = "token-a-refreshed"
+		profile.Expires = time.Now().Add(2 * time.Hour).UnixMilli()
+		return profile, nil
+	}
+	selection, err := manager.ResolveAuth(context.Background(), "session-refresh-ok", "openai-codex")
+	require.NoError(t, err)
+	require.NotNil(t, selection)
+	require.Equal(t, "token-a-refreshed", selection.Token)
+
+	store, err := manager.LoadStore()
+	require.NoError(t, err)
+	cred, ok := store.Profiles[profileID]
+	require.True(t, ok)
+	require.False(t, cred.RefreshFailed)
+}
+
+func TestFileAuthManager_ResolveAuth_PersistsRefreshFailedWhenNoProfileAvailable(t *testing.T) {
+	manager := NewFileAuthManagerWithPath(filepath.Join(t.TempDir(), "auth-profiles.json"))
+
+	profileA, err := manager.UpsertOAuthProfile("openai-codex", OAuthProfileInput{
+		Access:  "token-a",
+		Refresh: "refresh-a",
+		Expires: time.Now().Add(-1 * time.Hour).UnixMilli(),
+		Email:   "a@example.com",
+	})
+	require.NoError(t, err)
+	require.NotEmpty(t, profileA)
+
+	profileB, err := manager.UpsertOAuthProfile("openai-codex", OAuthProfileInput{
+		Access:  "token-b",
+		Refresh: "refresh-b",
+		Expires: time.Now().Add(-1 * time.Hour).UnixMilli(),
+		Email:   "b@example.com",
+	})
+	require.NoError(t, err)
+	require.NotEmpty(t, profileB)
+
+	manager.refreshFunc = func(_ context.Context, _ AuthProfileCredential) (AuthProfileCredential, error) {
+		return AuthProfileCredential{}, context.DeadlineExceeded
+	}
+
+	selection, err := manager.ResolveAuth(context.Background(), "session-refresh-fail-all", "openai-codex")
+	require.Error(t, err)
+	require.Nil(t, selection)
+	require.Contains(t, err.Error(), "no available auth profile")
+
+	store, err := manager.LoadStore()
+	require.NoError(t, err)
+
+	credA, ok := store.Profiles[profileA]
+	require.True(t, ok)
+	require.True(t, credA.RefreshFailed)
+
+	credB, ok := store.Profiles[profileB]
+	require.True(t, ok)
+	require.True(t, credB.RefreshFailed)
+}
+
 func TestUpdateProfileRateLimitStats_TracksFiveHourAndWeeklyWindows(t *testing.T) {
 	now := time.Unix(1773137048, 0)
 	stats := ProfileUsageStats{}

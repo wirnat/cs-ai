@@ -84,7 +84,7 @@ func TestExec_StopsRepeatedIdenticalFailingToolLoopsEarly(t *testing.T) {
 
 	require.NoError(t, err)
 	assert.Equal(t, Assistant, resp.Role)
-	assert.Equal(t, "Mohon ditunggu ya kak", resp.Content)
+	assert.Equal(t, "Saya sudah mendapatkan data utamanya. Saya hentikan iterasi tambahan agar tidak berputar terlalu lama, dan saya pakai hasil terbaik yang sudah terkumpul dulu ya.", resp.Content)
 	assert.Equal(t, 2, callCount)
 }
 
@@ -141,6 +141,6 @@ func TestExec_StopsConsecutiveFailingToolLoopsEvenWhenArgumentsChange(t *testing
 
 	require.NoError(t, err)
 	assert.Equal(t, Assistant, resp.Role)
-	assert.Equal(t, "Mohon ditunggu ya kak", resp.Content)
+	assert.Equal(t, "Saya sudah mendapatkan data utamanya. Saya hentikan iterasi tambahan agar tidak berputar terlalu lama, dan saya pakai hasil terbaik yang sudah terkumpul dulu ya.", resp.Content)
 	assert.Equal(t, 3, callCount)
 }

@@ -69,8 +69,6 @@ func parseGlobalFlags(args []string) globalFlags {
 		flags.MongoDatabase = firstNonEmpty(
 			os.Getenv("CS_AI_AUTH_MONGO_DATABASE"),
 			os.Getenv("CS_AI_MONGO_DATABASE"),
-			os.Getenv("MONGODB_DATABASE"),
-			os.Getenv("MONGO_DATABASE"),
 			"cs_ai",
 		)
 	}
@@ -78,8 +76,8 @@ func parseGlobalFlags(args []string) globalFlags {
 		flags.MongoCollection = firstNonEmpty(
 			os.Getenv("CS_AI_AUTH_MONGO_COLLECTION"),
 			os.Getenv("CS_AI_MONGO_COLLECTION"),
-			os.Getenv("MONGODB_COLLECTION"),
-			os.Getenv("MONGO_COLLECTION"),
+			os.Getenv("MONGODB_AUTH_COLLECTION"),
+			os.Getenv("MONGO_AUTH_COLLECTION"),
 			"auth_profiles",
 		)
 	}

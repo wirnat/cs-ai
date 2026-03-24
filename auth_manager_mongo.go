@@ -150,13 +150,16 @@ func (m *MongoAuthManager) ResolveAuth(ctx context.Context, sessionID string, pr
 	}
 
 	var selected *AuthSelection
+	var refreshedProfile *AuthProfileCredential
+	var resolveErr error
 	err := m.withLockedStore(func(store *AuthProfileStore) (bool, error) {
 		now := m.now().UnixMilli()
 		changed := clearExpiredWindows(store, now)
 
 		ordered := resolveProviderOrder(store, provider)
 		if len(ordered) == 0 {
-			return changed, fmt.Errorf("no auth profile configured for provider %s", provider)
+			resolveErr = fmt.Errorf("no auth profile configured for provider %s", provider)
+			return changed, nil
 		}
 
 		pinKey := sessionProviderKey(sessionID, provider)
@@ -182,17 +185,24 @@ func (m *MongoAuthManager) ResolveAuth(ctx context.Context, sessionID string, pr
 			if cred.Expires > 0 && now >= cred.Expires {
 				refreshed, refreshErr := m.refreshFunc(ctx, cred)
 				if refreshErr != nil {
+					cred.RefreshFailed = true
+					store.Profiles[profileID] = cred
 					markFailure(store, profileID, AuthFailureReasonAuth, now)
 					changed = true
 					continue
 				}
 				if strings.TrimSpace(refreshed.Access) == "" {
+					refreshed.RefreshFailed = true
+					store.Profiles[profileID] = refreshed
 					markFailure(store, profileID, AuthFailureReasonAuth, now)
 					changed = true
 					continue
 				}
+				refreshed.RefreshFailed = false
 				store.Profiles[profileID] = refreshed
 				cred = refreshed
+				refreshedCopy := refreshed
+				refreshedProfile = &refreshedCopy
 				changed = true
 			}
 
@@ -212,8 +222,15 @@ func (m *MongoAuthManager) ResolveAuth(ctx context.Context, sessionID string, pr
 				if cred.Expires > 0 && now >= cred.Expires {
 					refreshed, refreshErr := m.refreshFunc(ctx, cred)
 					if refreshErr == nil && strings.TrimSpace(refreshed.Access) != "" {
+						refreshed.RefreshFailed = false
 						store.Profiles[profileID] = refreshed
 						cred = refreshed
+						refreshedCopy := refreshed
+						refreshedProfile = &refreshedCopy
+						changed = true
+					} else {
+						cred.RefreshFailed = true
+						store.Profiles[profileID] = cred
 						changed = true
 					}
 				}
@@ -228,10 +245,22 @@ func (m *MongoAuthManager) ResolveAuth(ctx context.Context, sessionID string, pr
 			}
 		}
 
-		return changed, fmt.Errorf("no available auth profile for provider %s", provider)
+		resolveErr = fmt.Errorf("no available auth profile for provider %s", provider)
+		return changed, nil
 	})
 	if err != nil {
 		return nil, err
+	}
+	if selected == nil {
+		if resolveErr != nil {
+			return nil, resolveErr
+		}
+		return nil, fmt.Errorf("no available auth profile for provider %s", provider)
+	}
+	if refreshedProfile != nil {
+		if mirrorErr := mirrorRefreshedOAuthProfile(ctx, refreshMirrorSourceMongo, *refreshedProfile); mirrorErr != nil {
+			return nil, mirrorErr
+		}
 	}
 	return selected, nil
 }
@@ -318,12 +347,13 @@ func (m *MongoAuthManager) UpsertOAuthProfile(provider string, input OAuthProfil
 
 	err := m.withLockedStore(func(store *AuthProfileStore) (bool, error) {
 		store.Profiles[profileID] = AuthProfileCredential{
-			Type:     "oauth",
-			Provider: provider,
-			Access:   strings.TrimSpace(input.Access),
-			Refresh:  strings.TrimSpace(input.Refresh),
-			Expires:  input.Expires,
-			Email:    email,
+			Type:          "oauth",
+			Provider:      provider,
+			Access:        strings.TrimSpace(input.Access),
+			Refresh:       strings.TrimSpace(input.Refresh),
+			Expires:       input.Expires,
+			Email:         email,
+			RefreshFailed: false,
 		}
 
 		stats := store.UsageStats[profileID]

@@ -25,6 +25,8 @@ type AuthProfileCredential struct {
 	Refresh  string `json:"refresh,omitempty"`
 	Expires  int64  `json:"expires,omitempty"`
 	Email    string `json:"email,omitempty"`
+	// RefreshFailed menandai percobaan refresh token terakhir gagal.
+	RefreshFailed bool `json:"refresh_failed,omitempty" bson:"refresh_failed,omitempty"`
 }
 
 type ProfileUsageStats struct {
@@ -215,13 +217,16 @@ func (m *FileAuthManager) ResolveAuth(ctx context.Context, sessionID string, pro
 	}
 
 	var selected *AuthSelection
+	var refreshedProfile *AuthProfileCredential
+	var resolveErr error
 	err := m.withLockedStore(func(store *AuthProfileStore) (bool, error) {
 		now := m.now().UnixMilli()
 		changed := clearExpiredWindows(store, now)
 
 		ordered := resolveProviderOrder(store, provider)
 		if len(ordered) == 0 {
-			return changed, fmt.Errorf("no auth profile configured for provider %s", provider)
+			resolveErr = fmt.Errorf("no auth profile configured for provider %s", provider)
+			return changed, nil
 		}
 
 		pinKey := sessionProviderKey(sessionID, provider)
@@ -247,17 +252,24 @@ func (m *FileAuthManager) ResolveAuth(ctx context.Context, sessionID string, pro
 			if cred.Expires > 0 && now >= cred.Expires {
 				refreshed, refreshErr := m.refreshFunc(ctx, cred)
 				if refreshErr != nil {
+					cred.RefreshFailed = true
+					store.Profiles[profileID] = cred
 					markFailure(store, profileID, AuthFailureReasonAuth, now)
 					changed = true
 					continue
 				}
 				if strings.TrimSpace(refreshed.Access) == "" {
+					refreshed.RefreshFailed = true
+					store.Profiles[profileID] = refreshed
 					markFailure(store, profileID, AuthFailureReasonAuth, now)
 					changed = true
 					continue
 				}
+				refreshed.RefreshFailed = false
 				store.Profiles[profileID] = refreshed
 				cred = refreshed
+				refreshedCopy := refreshed
+				refreshedProfile = &refreshedCopy
 				changed = true
 			}
 
@@ -289,8 +301,15 @@ func (m *FileAuthManager) ResolveAuth(ctx context.Context, sessionID string, pro
 				if cred.Expires > 0 && now >= cred.Expires {
 					refreshed, refreshErr := m.refreshFunc(ctx, cred)
 					if refreshErr == nil && strings.TrimSpace(refreshed.Access) != "" {
+						refreshed.RefreshFailed = false
 						store.Profiles[profileID] = refreshed
 						cred = refreshed
+						refreshedCopy := refreshed
+						refreshedProfile = &refreshedCopy
+						changed = true
+					} else {
+						cred.RefreshFailed = true
+						store.Profiles[profileID] = cred
 						changed = true
 					}
 				}
@@ -309,10 +328,22 @@ func (m *FileAuthManager) ResolveAuth(ctx context.Context, sessionID string, pro
 			}
 		}
 
-		return changed, fmt.Errorf("no available auth profile for provider %s", provider)
+		resolveErr = fmt.Errorf("no available auth profile for provider %s", provider)
+		return changed, nil
 	})
 	if err != nil {
 		return nil, err
+	}
+	if selected == nil {
+		if resolveErr != nil {
+			return nil, resolveErr
+		}
+		return nil, fmt.Errorf("no available auth profile for provider %s", provider)
+	}
+	if refreshedProfile != nil {
+		if mirrorErr := mirrorRefreshedOAuthProfile(ctx, refreshMirrorSourceFile, *refreshedProfile); mirrorErr != nil {
+			return nil, mirrorErr
+		}
 	}
 	return selected, nil
 }
@@ -376,12 +407,13 @@ func (m *FileAuthManager) UpsertOAuthProfile(provider string, input OAuthProfile
 
 	err := m.withLockedStore(func(store *AuthProfileStore) (bool, error) {
 		store.Profiles[profileID] = AuthProfileCredential{
-			Type:     "oauth",
-			Provider: provider,
-			Access:   strings.TrimSpace(input.Access),
-			Refresh:  strings.TrimSpace(input.Refresh),
-			Expires:  input.Expires,
-			Email:    email,
+			Type:          "oauth",
+			Provider:      provider,
+			Access:        strings.TrimSpace(input.Access),
+			Refresh:       strings.TrimSpace(input.Refresh),
+			Expires:       input.Expires,
+			Email:         email,
+			RefreshFailed: false,
 		}
 		stats := store.UsageStats[profileID]
 		// Fresh login / token upsert should clear temporary lockouts so the
