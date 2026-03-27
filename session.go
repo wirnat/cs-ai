@@ -125,6 +125,62 @@ func (c *CsAI) SaveSystemMessages(sessionID string, messages []Message) error {
 	return nil
 }
 
+// GetSessionState retrieves structured session state for a session.
+func (c *CsAI) GetSessionState(sessionID string) (map[string]interface{}, error) {
+	if c.options.StorageProvider != nil {
+		ctx := context.Background()
+		return c.options.StorageProvider.GetSessionState(ctx, sessionID)
+	}
+
+	// Legacy Redis support
+	if c.options.Redis != nil {
+		key := fmt.Sprintf("ai:state:%s", sessionID)
+		data, err := c.options.Redis.Get(c.options.Redis.Context(), key).Result()
+		if err != nil {
+			if err.Error() == "redis: nil" {
+				return map[string]interface{}{}, nil
+			}
+			return nil, err
+		}
+		state := map[string]interface{}{}
+		if err := json.Unmarshal([]byte(data), &state); err != nil {
+			return nil, err
+		}
+		return state, nil
+	}
+
+	return map[string]interface{}{}, nil
+}
+
+// SaveSessionState saves structured session state for a session.
+func (c *CsAI) SaveSessionState(sessionID string, state map[string]interface{}) error {
+	state = cloneSessionStateMap(state)
+	if c.options.StorageProvider != nil {
+		ctx := context.Background()
+		ttl := c.options.SessionTTL
+		if ttl == 0 {
+			ttl = 12 * time.Hour
+		}
+		return c.options.StorageProvider.SaveSessionState(ctx, sessionID, state, ttl)
+	}
+
+	// Legacy Redis support
+	if c.options.Redis != nil {
+		key := fmt.Sprintf("ai:state:%s", sessionID)
+		data, err := json.Marshal(state)
+		if err != nil {
+			return err
+		}
+		ttl := c.options.SessionTTL
+		if ttl == 0 {
+			ttl = 12 * time.Hour
+		}
+		return c.options.Redis.Set(c.options.Redis.Context(), key, data, ttl).Err()
+	}
+
+	return nil
+}
+
 // ClearSession deletes all session data (conversation messages and system messages)
 func (c *CsAI) ClearSession(sessionID string) error {
 	if c.options.StorageProvider != nil {
@@ -136,7 +192,8 @@ func (c *CsAI) ClearSession(sessionID string) error {
 	if c.options.Redis != nil {
 		key := fmt.Sprintf("ai:session:%s", sessionID)
 		systemKey := fmt.Sprintf("ai:system:%s", sessionID)
-		return c.options.Redis.Del(c.options.Redis.Context(), key, systemKey).Err()
+		stateKey := fmt.Sprintf("ai:state:%s", sessionID)
+		return c.options.Redis.Del(c.options.Redis.Context(), key, systemKey, stateKey).Err()
 	}
 
 	return nil

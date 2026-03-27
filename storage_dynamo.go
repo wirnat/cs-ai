@@ -20,11 +20,12 @@ type DynamoStorageProvider struct {
 
 // DynamoDBSession represents a session document in DynamoDB
 type DynamoDBSession struct {
-	SessionID      string    `dynamodbav:"session_id"`
-	Messages       []Message `dynamodbav:"messages"`
-	SystemMessages []Message `dynamodbav:"system_messages"` // Pre-chat/default messages
-	ExpiresAt      int64     `dynamodbav:"expires_at"`
-	UpdatedAt      int64     `dynamodbav:"updated_at"`
+	SessionID      string                 `dynamodbav:"session_id"`
+	Messages       []Message              `dynamodbav:"messages"`
+	SystemMessages []Message              `dynamodbav:"system_messages"` // Pre-chat/default messages
+	State          map[string]interface{} `dynamodbav:"state"`
+	ExpiresAt      int64                  `dynamodbav:"expires_at"`
+	UpdatedAt      int64                  `dynamodbav:"updated_at"`
 }
 
 // DynamoDBLearningData represents learning data document in DynamoDB
@@ -94,36 +95,13 @@ func NewDynamoStorageProvider(config StorageConfig) (*DynamoStorageProvider, err
 
 // GetSessionMessages retrieves session messages from DynamoDB
 func (d *DynamoStorageProvider) GetSessionMessages(ctx context.Context, sessionID string) ([]Message, error) {
-	ctx, cancel := context.WithTimeout(ctx, d.config.Timeout)
-	defer cancel()
-
-	result, err := d.client.GetItem(ctx, &dynamodb.GetItemInput{
-		TableName: aws.String(d.config.DynamoTable),
-		Key: map[string]types.AttributeValue{
-			"session_id": &types.AttributeValueMemberS{Value: sessionID},
-		},
-	})
+	session, err := d.getSessionRecord(ctx, sessionID)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get session from DynamoDB: %w", err)
+		return nil, err
 	}
-
-	if result.Item == nil {
-		return nil, nil // Session not found
-	}
-
-	var session DynamoDBSession
-	err = attributevalue.UnmarshalMap(result.Item, &session)
-	if err != nil {
-		return nil, fmt.Errorf("failed to unmarshal session: %w", err)
-	}
-
-	// Check if session has expired
-	if time.Now().Unix() > session.ExpiresAt {
-		// Delete expired session
-		_ = d.DeleteSession(ctx, sessionID)
+	if session == nil {
 		return nil, nil
 	}
-
 	return session.Messages, nil
 }
 
@@ -142,11 +120,20 @@ func (d *DynamoStorageProvider) SaveSessionMessages(ctx context.Context, session
 	expiresAt := time.Now().Add(ttl).Unix()
 	updatedAt := time.Now().Unix()
 
+	existing, err := d.getSessionRecord(ctx, sessionID)
+	if err != nil {
+		return err
+	}
+
 	session := DynamoDBSession{
 		SessionID: sessionID,
 		Messages:  messages,
 		ExpiresAt: expiresAt,
 		UpdatedAt: updatedAt,
+	}
+	if existing != nil {
+		session.SystemMessages = existing.SystemMessages
+		session.State = cloneSessionStateMap(existing.State)
 	}
 
 	item, err := attributevalue.MarshalMap(session)
@@ -185,34 +172,13 @@ func (d *DynamoStorageProvider) DeleteSession(ctx context.Context, sessionID str
 
 // GetSystemMessages retrieves system messages from DynamoDB
 func (d *DynamoStorageProvider) GetSystemMessages(ctx context.Context, sessionID string) ([]Message, error) {
-	ctx, cancel := context.WithTimeout(ctx, d.config.Timeout)
-	defer cancel()
-
-	result, err := d.client.GetItem(ctx, &dynamodb.GetItemInput{
-		TableName: aws.String(d.config.DynamoTable),
-		Key: map[string]types.AttributeValue{
-			"session_id": &types.AttributeValueMemberS{Value: sessionID},
-		},
-	})
+	session, err := d.getSessionRecord(ctx, sessionID)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get session from DynamoDB: %w", err)
+		return nil, err
 	}
-
-	if result.Item == nil {
-		return nil, nil // Session not found
-	}
-
-	var session DynamoDBSession
-	err = attributevalue.UnmarshalMap(result.Item, &session)
-	if err != nil {
-		return nil, fmt.Errorf("failed to unmarshal session: %w", err)
-	}
-
-	// Check if session has expired
-	if time.Now().Unix() > session.ExpiresAt {
+	if session == nil {
 		return nil, nil
 	}
-
 	return session.SystemMessages, nil
 }
 
@@ -224,15 +190,20 @@ func (d *DynamoStorageProvider) SaveSystemMessages(ctx context.Context, sessionI
 	expiresAt := time.Now().Add(ttl).Unix()
 	updatedAt := time.Now().Unix()
 
-	// Get existing session to preserve other fields
-	existing, _ := d.GetSessionMessages(ctx, sessionID)
+	existing, err := d.getSessionRecord(ctx, sessionID)
+	if err != nil {
+		return err
+	}
 
 	session := DynamoDBSession{
 		SessionID:      sessionID,
-		Messages:       existing,
 		SystemMessages: messages,
 		ExpiresAt:      expiresAt,
 		UpdatedAt:      updatedAt,
+	}
+	if existing != nil {
+		session.Messages = existing.Messages
+		session.State = cloneSessionStateMap(existing.State)
 	}
 
 	item, err := attributevalue.MarshalMap(session)
@@ -249,6 +220,84 @@ func (d *DynamoStorageProvider) SaveSystemMessages(ctx context.Context, sessionI
 	}
 
 	return nil
+}
+
+func (d *DynamoStorageProvider) GetSessionState(ctx context.Context, sessionID string) (map[string]interface{}, error) {
+	session, err := d.getSessionRecord(ctx, sessionID)
+	if err != nil {
+		return nil, err
+	}
+	if session == nil {
+		return map[string]interface{}{}, nil
+	}
+	return cloneSessionStateMap(session.State), nil
+}
+
+func (d *DynamoStorageProvider) SaveSessionState(ctx context.Context, sessionID string, state map[string]interface{}, ttl time.Duration) error {
+	ctx, cancel := context.WithTimeout(ctx, d.config.Timeout)
+	defer cancel()
+
+	expiresAt := time.Now().Add(ttl).Unix()
+	updatedAt := time.Now().Unix()
+
+	existing, err := d.getSessionRecord(ctx, sessionID)
+	if err != nil {
+		return err
+	}
+
+	session := DynamoDBSession{
+		SessionID: sessionID,
+		State:     cloneSessionStateMap(state),
+		ExpiresAt: expiresAt,
+		UpdatedAt: updatedAt,
+	}
+	if existing != nil {
+		session.Messages = existing.Messages
+		session.SystemMessages = existing.SystemMessages
+	}
+
+	item, err := attributevalue.MarshalMap(session)
+	if err != nil {
+		return fmt.Errorf("failed to marshal session state: %w", err)
+	}
+
+	_, err = d.client.PutItem(ctx, &dynamodb.PutItemInput{
+		TableName: aws.String(d.config.DynamoTable),
+		Item:      item,
+	})
+	if err != nil {
+		return fmt.Errorf("failed to save session state to DynamoDB: %w", err)
+	}
+
+	return nil
+}
+
+func (d *DynamoStorageProvider) getSessionRecord(ctx context.Context, sessionID string) (*DynamoDBSession, error) {
+	ctx, cancel := context.WithTimeout(ctx, d.config.Timeout)
+	defer cancel()
+
+	result, err := d.client.GetItem(ctx, &dynamodb.GetItemInput{
+		TableName: aws.String(d.config.DynamoTable),
+		Key: map[string]types.AttributeValue{
+			"session_id": &types.AttributeValueMemberS{Value: sessionID},
+		},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to get session from DynamoDB: %w", err)
+	}
+	if result.Item == nil {
+		return nil, nil
+	}
+
+	var session DynamoDBSession
+	if err := attributevalue.UnmarshalMap(result.Item, &session); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal session: %w", err)
+	}
+	if time.Now().Unix() > session.ExpiresAt {
+		_ = d.DeleteSession(ctx, sessionID)
+		return nil, nil
+	}
+	return &session, nil
 }
 
 // SaveLearningData saves learning data to DynamoDB

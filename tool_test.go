@@ -12,6 +12,15 @@ type getItemStockParam struct {
 	Date *string `json:"date" description:"desc date"`
 }
 
+type nestedToolParam struct {
+	Items []struct {
+		ServiceUID string `json:"service_uid" validate:"required" description:"uid layanan"`
+		Meta       struct {
+			Note string `json:"note" description:"catatan"`
+		} `json:"meta" description:"metadata"`
+	} `json:"items" validate:"required" description:"daftar item"`
+}
+
 func TestConvertParam(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -24,7 +33,59 @@ func TestConvertParam(t *testing.T) {
 				Name: "Item1",
 				Date: nil,
 			},
-			expected: map[string]interface{}{"properties": map[string]map[string]interface{}{"date": map[string]interface{}{"type": "string", "description": "desc date", "default": nil}, "name": map[string]interface{}{"type": "string", "description": "desc name", "default": nil}}, "required": []string{"name"}, "type": "object"},
+			expected: map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"date": map[string]interface{}{
+						"type":        "string",
+						"description": "desc date",
+					},
+					"name": map[string]interface{}{
+						"type":        "string",
+						"description": "desc name",
+					},
+				},
+				"required":             []interface{}{"name"},
+				"additionalProperties": false,
+			},
+		},
+		{
+			name:  "NestedToolParam",
+			param: nestedToolParam{},
+			expected: map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"items": map[string]interface{}{
+						"type":        "array",
+						"description": "daftar item",
+						"items": map[string]interface{}{
+							"type": "object",
+							"properties": map[string]interface{}{
+								"service_uid": map[string]interface{}{
+									"type":        "string",
+									"description": "uid layanan",
+								},
+								"meta": map[string]interface{}{
+									"type":        "object",
+									"description": "metadata",
+									"properties": map[string]interface{}{
+										"note": map[string]interface{}{
+											"type":        "string",
+											"description": "catatan",
+										},
+									},
+									"required":             []interface{}{},
+									"additionalProperties": false,
+								},
+							},
+							"required":             []interface{}{"service_uid"},
+							"additionalProperties": false,
+						},
+					},
+				},
+				"required":             []interface{}{"items"},
+				"additionalProperties": false,
+			},
 		},
 	}
 

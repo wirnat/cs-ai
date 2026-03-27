@@ -18,12 +18,13 @@ type InMemoryStorageProvider struct {
 
 // MemorySession represents a session in memory
 type MemorySession struct {
-	SessionID      string    `json:"session_id"`
-	Messages       []Message `json:"messages"`
-	SystemMessages []Message `json:"system_messages"` // Pre-chat/default messages
-	TTL            time.Time `json:"ttl"`
-	CreatedAt      time.Time `json:"created_at"`
-	UpdatedAt      time.Time `json:"updated_at"`
+	SessionID      string                 `json:"session_id"`
+	Messages       []Message              `json:"messages"`
+	SystemMessages []Message              `json:"system_messages"` // Pre-chat/default messages
+	State          map[string]interface{} `json:"state,omitempty"`
+	TTL            time.Time              `json:"ttl"`
+	CreatedAt      time.Time              `json:"created_at"`
+	UpdatedAt      time.Time              `json:"updated_at"`
 }
 
 // NewInMemoryStorageProvider creates a new in-memory storage provider
@@ -87,8 +88,12 @@ func (m *InMemoryStorageProvider) SaveSessionMessages(ctx context.Context, sessi
 
 	if existing, exists := m.sessions[sessionID]; exists {
 		session.CreatedAt = existing.CreatedAt
+		session.SystemMessages = existing.SystemMessages
+		session.State = cloneSessionStateMap(existing.State)
 	} else {
 		session.CreatedAt = now
+		session.SystemMessages = []Message{}
+		session.State = map[string]interface{}{}
 	}
 
 	m.sessions[sessionID] = session
@@ -147,10 +152,64 @@ func (m *InMemoryStorageProvider) SaveSystemMessages(ctx context.Context, sessio
 			SessionID:      sessionID,
 			Messages:       []Message{},
 			SystemMessages: messages,
+			State:          map[string]interface{}{},
 			TTL:            now.Add(ttl),
 			CreatedAt:      now,
 			UpdatedAt:      now,
 		}
+	}
+
+	return nil
+}
+
+func (m *InMemoryStorageProvider) GetSessionState(ctx context.Context, sessionID string) (map[string]interface{}, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	session, exists := m.sessions[sessionID]
+	if !exists {
+		return map[string]interface{}{}, nil
+	}
+
+	if time.Now().After(session.TTL) {
+		delete(m.sessions, sessionID)
+		return map[string]interface{}{}, nil
+	}
+
+	return cloneSessionStateMap(session.State), nil
+}
+
+func (m *InMemoryStorageProvider) SaveSessionState(ctx context.Context, sessionID string, state map[string]interface{}, ttl time.Duration) error {
+	if ttl == 0 {
+		ttl = m.config.SessionTTL
+	}
+	if ttl == 0 {
+		ttl = 12 * time.Hour
+	}
+
+	now := time.Now()
+	clonedState := cloneSessionStateMap(state)
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if existing, exists := m.sessions[sessionID]; exists {
+		existing.State = clonedState
+		existing.UpdatedAt = now
+		if now.Add(ttl).After(existing.TTL) {
+			existing.TTL = now.Add(ttl)
+		}
+		return nil
+	}
+
+	m.sessions[sessionID] = &MemorySession{
+		SessionID:      sessionID,
+		Messages:       []Message{},
+		SystemMessages: []Message{},
+		State:          clonedState,
+		TTL:            now.Add(ttl),
+		CreatedAt:      now,
+		UpdatedAt:      now,
 	}
 
 	return nil

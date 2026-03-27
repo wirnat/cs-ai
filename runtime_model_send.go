@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"sort"
 	"strings"
 )
 
@@ -289,7 +290,7 @@ func buildRequestBodyByAPIMode(
 		"stream_options":    nil,
 		"temperature":       temperature,
 		"top_p":             topP,
-		"tools":             function,
+		"tools":             buildChatCompletionTools(function),
 		"tool_choice":       toolChoice,
 		"logprobs":          false,
 		"top_logprobs":      nil,
@@ -436,6 +437,7 @@ func buildCodexTools(function []map[string]interface{}) []map[string]interface{}
 			continue
 		}
 
+		strict := extractInternalToolStrict(item)
 		tool := map[string]interface{}{
 			"type": toolType,
 			"name": name,
@@ -443,10 +445,8 @@ func buildCodexTools(function []map[string]interface{}) []map[string]interface{}
 		if desc := strings.TrimSpace(toString(fn["description"])); desc != "" {
 			tool["description"] = desc
 		}
-		tool["parameters"] = normalizeCodexToolParameters(fn["parameters"])
-		// Keep strict mode disabled for compatibility with existing tool schemas
-		// that contain optional fields and partial `required` sets.
-		tool["strict"] = false
+		tool["parameters"] = normalizeCodexToolParameters(fn["parameters"], strict)
+		tool["strict"] = strict
 		tools = append(tools, tool)
 	}
 
@@ -456,7 +456,61 @@ func buildCodexTools(function []map[string]interface{}) []map[string]interface{}
 	return tools
 }
 
-func normalizeCodexToolParameters(raw interface{}) map[string]interface{} {
+func buildChatCompletionTools(function []map[string]interface{}) []map[string]interface{} {
+	if len(function) == 0 {
+		return []map[string]interface{}{}
+	}
+
+	tools := make([]map[string]interface{}, 0, len(function))
+	for _, item := range function {
+		if item == nil {
+			continue
+		}
+		toolType := strings.TrimSpace(toString(item["type"]))
+		if toolType == "" {
+			toolType = "function"
+		}
+
+		fn, ok := item["function"].(map[string]interface{})
+		if !ok || fn == nil {
+			continue
+		}
+
+		tool := map[string]interface{}{
+			"type": "function",
+			"function": map[string]interface{}{
+				"name":        strings.TrimSpace(toString(fn["name"])),
+				"description": strings.TrimSpace(toString(fn["description"])),
+				"parameters":  normalizeCodexToolParameters(fn["parameters"], false),
+			},
+		}
+		if toolType != "" {
+			tool["type"] = toolType
+		}
+		tools = append(tools, tool)
+	}
+	return tools
+}
+
+func extractInternalToolStrict(item map[string]interface{}) bool {
+	if item == nil {
+		return false
+	}
+	raw, exists := item["_csai_strict"]
+	if !exists {
+		return false
+	}
+	switch v := raw.(type) {
+	case bool:
+		return v
+	case string:
+		return strings.EqualFold(strings.TrimSpace(v), "true")
+	default:
+		return false
+	}
+}
+
+func normalizeCodexToolParameters(raw interface{}, strict bool) map[string]interface{} {
 	schema, ok := toMapStringInterface(raw)
 	if !ok || schema == nil {
 		return defaultCodexToolParameters()
@@ -468,7 +522,7 @@ func normalizeCodexToolParameters(raw interface{}) map[string]interface{} {
 		}
 		schema = assumed
 	}
-	normalizeCodexJSONSchema(schema)
+	normalizeCodexJSONSchema(schema, strict)
 	return schema
 }
 
@@ -499,7 +553,7 @@ func shouldAssumeObjectSchema(schema map[string]interface{}) bool {
 	return true
 }
 
-func normalizeCodexJSONSchema(schema map[string]interface{}) {
+func normalizeCodexJSONSchema(schema map[string]interface{}, strict bool) {
 	if schema == nil {
 		return
 	}
@@ -518,12 +572,25 @@ func normalizeCodexJSONSchema(schema map[string]interface{}) {
 			props = map[string]interface{}{}
 		}
 		for key, value := range props {
-			props[key] = normalizeCodexJSONSchemaNode(value)
+			props[key] = normalizeCodexJSONSchemaNode(value, strict)
 		}
 		schema["properties"] = props
 
 		rawRequired, _ := toSliceInterface(schema["required"])
-		required := normalizeRequiredKeys(rawRequired, props)
+		originalRequired := normalizeRequiredKeys(rawRequired, props, false)
+		if strict {
+			requiredSet := make(map[string]struct{}, len(originalRequired))
+			for _, item := range originalRequired {
+				requiredSet[toString(item)] = struct{}{}
+			}
+			for key, value := range props {
+				if _, exists := requiredSet[key]; exists {
+					continue
+				}
+				props[key] = makeCodexSchemaNullable(value)
+			}
+		}
+		required := normalizeRequiredKeys(rawRequired, props, strict)
 		schema["required"] = required
 
 		// Strict tool mode on OpenAI requires this field and it must be false.
@@ -538,41 +605,41 @@ func normalizeCodexJSONSchema(schema map[string]interface{}) {
 	}
 
 	if items, ok := schema["items"]; ok && items != nil {
-		schema["items"] = normalizeCodexJSONSchemaNode(items)
+		schema["items"] = normalizeCodexJSONSchemaNode(items, strict)
 	}
 	for _, key := range []string{"anyOf", "oneOf", "allOf"} {
 		if values, ok := schema[key].([]interface{}); ok && values != nil {
 			for i, item := range values {
-				values[i] = normalizeCodexJSONSchemaNode(item)
+				values[i] = normalizeCodexJSONSchemaNode(item, strict)
 			}
 			schema[key] = values
 		}
 	}
 	if notValue, ok := schema["not"]; ok && notValue != nil {
-		schema["not"] = normalizeCodexJSONSchemaNode(notValue)
+		schema["not"] = normalizeCodexJSONSchemaNode(notValue, strict)
 	}
 	if defs, ok := schema["$defs"].(map[string]interface{}); ok && defs != nil {
 		for key, item := range defs {
-			defs[key] = normalizeCodexJSONSchemaNode(item)
+			defs[key] = normalizeCodexJSONSchemaNode(item, strict)
 		}
 		schema["$defs"] = defs
 	}
 	if defs, ok := schema["definitions"].(map[string]interface{}); ok && defs != nil {
 		for key, item := range defs {
-			defs[key] = normalizeCodexJSONSchemaNode(item)
+			defs[key] = normalizeCodexJSONSchemaNode(item, strict)
 		}
 		schema["definitions"] = defs
 	}
 }
 
-func normalizeCodexJSONSchemaNode(value interface{}) interface{} {
+func normalizeCodexJSONSchemaNode(value interface{}, strict bool) interface{} {
 	switch v := value.(type) {
 	case map[string]interface{}:
-		normalizeCodexJSONSchema(v)
+		normalizeCodexJSONSchema(v, strict)
 		return v
 	case []interface{}:
 		for i, item := range v {
-			v[i] = normalizeCodexJSONSchemaNode(item)
+			v[i] = normalizeCodexJSONSchemaNode(item, strict)
 		}
 		return v
 	default:
@@ -644,7 +711,7 @@ func toSliceInterface(value interface{}) ([]interface{}, bool) {
 	return out, true
 }
 
-func normalizeRequiredKeys(raw []interface{}, props map[string]interface{}) []interface{} {
+func normalizeRequiredKeys(raw []interface{}, props map[string]interface{}, strict bool) []interface{} {
 	if len(props) == 0 {
 		return []interface{}{}
 	}
@@ -664,7 +731,73 @@ func normalizeRequiredKeys(raw []interface{}, props map[string]interface{}) []in
 		seen[key] = struct{}{}
 		normalized = append(normalized, key)
 	}
+	if strict {
+		keys := make([]string, 0, len(props))
+		for key := range props {
+			keys = append(keys, key)
+		}
+		sort.Strings(keys)
+		normalized = make([]interface{}, 0, len(keys))
+		for _, key := range keys {
+			normalized = append(normalized, key)
+		}
+	}
 	return normalized
+}
+
+func makeCodexSchemaNullable(value interface{}) interface{} {
+	schema, ok := value.(map[string]interface{})
+	if !ok || schema == nil {
+		return value
+	}
+
+	rawType, exists := schema["type"]
+	if !exists || rawType == nil {
+		switch {
+		case schema["properties"] != nil:
+			schema["type"] = []interface{}{"object", "null"}
+		case schema["items"] != nil:
+			schema["type"] = []interface{}{"array", "null"}
+		}
+		return schema
+	}
+
+	switch typed := rawType.(type) {
+	case string:
+		normalized := strings.TrimSpace(typed)
+		if normalized == "" || strings.EqualFold(normalized, "null") {
+			return schema
+		}
+		schema["type"] = []interface{}{normalized, "null"}
+	case []interface{}:
+		hasNull := false
+		normalized := make([]interface{}, 0, len(typed)+1)
+		for _, item := range typed {
+			if strings.EqualFold(strings.TrimSpace(toString(item)), "null") {
+				hasNull = true
+			}
+			normalized = append(normalized, item)
+		}
+		if !hasNull {
+			normalized = append(normalized, "null")
+		}
+		schema["type"] = normalized
+	case []string:
+		hasNull := false
+		normalized := make([]interface{}, 0, len(typed)+1)
+		for _, item := range typed {
+			if strings.EqualFold(strings.TrimSpace(item), "null") {
+				hasNull = true
+			}
+			normalized = append(normalized, item)
+		}
+		if !hasNull {
+			normalized = append(normalized, "null")
+		}
+		schema["type"] = normalized
+	}
+
+	return schema
 }
 
 func resolveModelProvider(modelCandidate Modeler) string {

@@ -172,6 +172,16 @@ func (c *CustomStorageProvider) SaveSystemMessages(ctx context.Context, sessionI
 	return nil
 }
 
+func (c *CustomStorageProvider) GetSessionState(ctx context.Context, sessionID string) (map[string]interface{}, error) {
+	// Implement your custom logic for retrieving structured session state
+	return map[string]interface{}{}, nil
+}
+
+func (c *CustomStorageProvider) SaveSessionState(ctx context.Context, sessionID string, state map[string]interface{}, ttl time.Duration) error {
+	// Implement your custom logic for saving structured session state
+	return nil
+}
+
 func (c *CustomStorageProvider) SaveLearningData(ctx context.Context, data LearningData) error {
 	// Implement your custom logic
 	return nil

@@ -84,7 +84,8 @@ func (r *RedisStorageProvider) SaveSessionMessages(ctx context.Context, sessionI
 func (r *RedisStorageProvider) DeleteSession(ctx context.Context, sessionID string) error {
 	key := fmt.Sprintf("ai:session:%s", sessionID)
 	systemKey := fmt.Sprintf("ai:system:%s", sessionID)
-	return r.client.Del(ctx, key, systemKey).Err()
+	stateKey := fmt.Sprintf("ai:state:%s", sessionID)
+	return r.client.Del(ctx, key, systemKey, stateKey).Err()
 }
 
 func (r *RedisStorageProvider) GetSystemMessages(ctx context.Context, sessionID string) ([]Message, error) {
@@ -118,6 +119,41 @@ func (r *RedisStorageProvider) SaveSystemMessages(ctx context.Context, sessionID
 	}
 	if ttl == 0 {
 		ttl = 12 * time.Hour // Default fallback
+	}
+
+	return r.client.Set(ctx, key, data, ttl).Err()
+}
+
+func (r *RedisStorageProvider) GetSessionState(ctx context.Context, sessionID string) (map[string]interface{}, error) {
+	key := fmt.Sprintf("ai:state:%s", sessionID)
+	data, err := r.client.Get(ctx, key).Result()
+	if err != nil {
+		if err == redis.Nil {
+			return map[string]interface{}{}, nil
+		}
+		return nil, fmt.Errorf("failed to get session state from Redis: %v", err)
+	}
+
+	state := map[string]interface{}{}
+	if err := json.Unmarshal([]byte(data), &state); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal session state: %v", err)
+	}
+
+	return state, nil
+}
+
+func (r *RedisStorageProvider) SaveSessionState(ctx context.Context, sessionID string, state map[string]interface{}, ttl time.Duration) error {
+	key := fmt.Sprintf("ai:state:%s", sessionID)
+	data, err := json.Marshal(cloneSessionStateMap(state))
+	if err != nil {
+		return fmt.Errorf("failed to marshal session state: %v", err)
+	}
+
+	if ttl == 0 {
+		ttl = r.config.SessionTTL
+	}
+	if ttl == 0 {
+		ttl = 12 * time.Hour
 	}
 
 	return r.client.Set(ctx, key, data, ttl).Err()

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"reflect"
+	"strings"
 )
 
 func isValidResponse(msg Message) bool {
@@ -69,21 +70,12 @@ func validateResponse(data interface{}, params map[string]interface{}) error {
 	case map[string]interface{}:
 		// Validasi untuk response berupa map
 		for key, paramValue := range params {
+			if !shouldValidateEchoParam(paramValue) {
+				continue
+			}
 			if responseValue, exists := v[key]; exists {
-				// Handle numeric type coercion (JSON unmarshal converts all numbers to float64)
-				if equal, bothNumeric := isNumericEqual(responseValue, paramValue); bothNumeric {
-					if !equal {
-						return fmt.Errorf("nilai response untuk parameter %s tidak sesuai", key)
-					}
-					continue
-				}
-				// Non-numeric: validasi tipe data
-				if reflect.TypeOf(responseValue) != reflect.TypeOf(paramValue) {
-					return fmt.Errorf("tipe data response untuk parameter %s tidak sesuai", key)
-				}
-				// Validasi nilai
-				if !reflect.DeepEqual(responseValue, paramValue) {
-					return fmt.Errorf("nilai response untuk parameter %s tidak sesuai", key)
+				if err := validateEchoValue(key, responseValue, paramValue); err != nil {
+					return err
 				}
 			}
 		}
@@ -92,26 +84,78 @@ func validateResponse(data interface{}, params map[string]interface{}) error {
 		if len(v) > 0 {
 			if firstItem, ok := v[0].(map[string]interface{}); ok {
 				for key, paramValue := range params {
+					if !shouldValidateEchoParam(paramValue) {
+						continue
+					}
 					if responseValue, exists := firstItem[key]; exists {
-						// Handle numeric type coercion
-						if equal, bothNumeric := isNumericEqual(responseValue, paramValue); bothNumeric {
-							if !equal {
-								return fmt.Errorf("nilai response untuk parameter %s tidak sesuai", key)
-							}
-							continue
-						}
-						// Non-numeric: validasi tipe data
-						if reflect.TypeOf(responseValue) != reflect.TypeOf(paramValue) {
-							return fmt.Errorf("tipe data response untuk parameter %s tidak sesuai", key)
-						}
-						// Validasi nilai
-						if !reflect.DeepEqual(responseValue, paramValue) {
-							return fmt.Errorf("nilai response untuk parameter %s tidak sesuai", key)
+						if err := validateEchoValue(key, responseValue, paramValue); err != nil {
+							return err
 						}
 					}
 				}
 			}
 		}
 	}
+	return nil
+}
+
+// shouldValidateEchoParam keeps response validation focused on explicit scalar
+// inputs. Tool responses often enrich optional or complex fields (for example
+// service_name/services), so validating those as exact echoes creates false
+// negatives during execution.
+func shouldValidateEchoParam(paramValue interface{}) bool {
+	if paramValue == nil {
+		return false
+	}
+
+	switch v := paramValue.(type) {
+	case string:
+		return strings.TrimSpace(v) != ""
+	case bool:
+		// Boolean params are often optional control flags; enforcing exact echo
+		// here creates false negatives when tools normalize or enrich payloads.
+		return false
+	case int, int8, int16, int32, int64,
+		uint, uint8, uint16, uint32, uint64,
+		float32, float64:
+		// Numeric params are frequently defaulted/normalized by tools
+		// (e.g. quantity fallback), so skip strict echo validation.
+		return false
+	case []interface{}:
+		return false
+	case map[string]interface{}:
+		return false
+	}
+
+	rv := reflect.ValueOf(paramValue)
+	switch rv.Kind() {
+	case reflect.Invalid:
+		return false
+	case reflect.Slice, reflect.Array, reflect.Map, reflect.Struct:
+		return false
+	default:
+		return true
+	}
+}
+
+func validateEchoValue(key string, responseValue interface{}, paramValue interface{}) error {
+	// Handle numeric type coercion (JSON unmarshal converts all numbers to float64)
+	if equal, bothNumeric := isNumericEqual(responseValue, paramValue); bothNumeric {
+		if !equal {
+			return fmt.Errorf("nilai response untuk parameter %s tidak sesuai", key)
+		}
+		return nil
+	}
+
+	// Non-numeric: validasi tipe data
+	if reflect.TypeOf(responseValue) != reflect.TypeOf(paramValue) {
+		return fmt.Errorf("tipe data response untuk parameter %s tidak sesuai", key)
+	}
+
+	// Validasi nilai
+	if !reflect.DeepEqual(responseValue, paramValue) {
+		return fmt.Errorf("nilai response untuk parameter %s tidak sesuai", key)
+	}
+
 	return nil
 }

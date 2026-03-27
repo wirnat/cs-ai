@@ -148,6 +148,7 @@ func TestBuildCodexTools_NormalizesSchemaForStrictMode(t *testing.T) {
 					"required": []string{"date", "time", "extra"},
 				},
 			},
+			"_csai_strict": true,
 		},
 	}
 
@@ -197,8 +198,8 @@ func TestBuildCodexTools_NormalizesSchemaForStrictMode(t *testing.T) {
 		t.Fatalf("expected empty schema additionalProperties=false, got: %#v", thirdParams["additionalProperties"])
 	}
 
-	if strict, ok := tools[3]["strict"].(bool); !ok || strict {
-		t.Fatalf("expected strict=false for codex tools, got: %#v", tools[3]["strict"])
+	if strict, ok := tools[3]["strict"].(bool); !ok || !strict {
+		t.Fatalf("expected strict=true for codex tools with internal flag, got: %#v", tools[3]["strict"])
 	}
 	fourthParams, ok := tools[3]["parameters"].(map[string]interface{})
 	if !ok {
@@ -212,8 +213,8 @@ func TestBuildCodexTools_NormalizesSchemaForStrictMode(t *testing.T) {
 	if !ok {
 		t.Fatalf("unexpected required type: %#v", fourthParams["required"])
 	}
-	if len(required) != 2 {
-		t.Fatalf("expected invalid required keys filtered out, got: %#v", required)
+	if len(required) != 3 {
+		t.Fatalf("expected strict schema to require all properties, got: %#v", required)
 	}
 	discountField, ok := fourthProps["discount_uids"].(map[string]interface{})
 	if !ok {
@@ -221,6 +222,63 @@ func TestBuildCodexTools_NormalizesSchemaForStrictMode(t *testing.T) {
 	}
 	if _, ok := discountField["items"]; !ok {
 		t.Fatalf("expected array field to include items schema, got: %#v", discountField)
+	}
+	discountType, ok := discountField["type"].([]interface{})
+	if !ok || len(discountType) != 2 || toString(discountType[0]) != "array" || toString(discountType[1]) != "null" {
+		t.Fatalf("expected optional strict field to become nullable, got: %#v", discountField["type"])
+	}
+	dateField, ok := fourthProps["date"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected date schema object, got: %#v", fourthProps["date"])
+	}
+	if toString(dateField["type"]) != "string" {
+		t.Fatalf("expected required field type to stay string, got: %#v", dateField["type"])
+	}
+}
+
+func TestBuildCodexTools_StrictOptionalFieldBecomesNullableAndRequired(t *testing.T) {
+	functions := []map[string]interface{}{
+		{
+			"type": "function",
+			"function": map[string]interface{}{
+				"name": "service-catalog",
+				"parameters": map[string]interface{}{
+					"type": "object",
+					"properties": map[string]interface{}{
+						"provider_uid": map[string]interface{}{"type": "string"},
+					},
+					"required": []interface{}{},
+				},
+			},
+			"_csai_strict": true,
+		},
+	}
+
+	tools := buildCodexTools(functions)
+	if len(tools) != 1 {
+		t.Fatalf("expected 1 tool, got %d", len(tools))
+	}
+
+	params, ok := tools[0]["parameters"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("unexpected params type: %#v", tools[0]["parameters"])
+	}
+	required, ok := params["required"].([]interface{})
+	if !ok || len(required) != 1 || toString(required[0]) != "provider_uid" {
+		t.Fatalf("expected provider_uid to be required in strict schema, got: %#v", params["required"])
+	}
+
+	props, ok := params["properties"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("unexpected properties type: %#v", params["properties"])
+	}
+	providerField, ok := props["provider_uid"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("unexpected provider_uid schema: %#v", props["provider_uid"])
+	}
+	providerType, ok := providerField["type"].([]interface{})
+	if !ok || len(providerType) != 2 || toString(providerType[0]) != "string" || toString(providerType[1]) != "null" {
+		t.Fatalf("expected provider_uid to be nullable under strict mode, got: %#v", providerField["type"])
 	}
 }
 

@@ -37,8 +37,15 @@ func normalizeToolArguments(paramTemplate interface{}, args map[string]interface
 		if !exists {
 			continue
 		}
+		if rawValue == nil {
+			if toolFieldIsSemanticallyRequired(field) {
+				return nil, fmt.Errorf("invalid value for field %s: required value cannot be null", jsonKey)
+			}
+			delete(normalized, jsonKey)
+			continue
+		}
 
-		coercedValue, err := coerceToolArgValue(rawValue, field.Type)
+		coercedValue, err := coerceToolArgValue(rawValue, field.Type, toolFieldIsSemanticallyRequired(field))
 		if err != nil {
 			return nil, fmt.Errorf("invalid value for field %s: %w", jsonKey, err)
 		}
@@ -64,12 +71,17 @@ func fieldJSONKey(field reflect.StructField) string {
 	return key
 }
 
-func coerceToolArgValue(value interface{}, targetType reflect.Type) (interface{}, error) {
+func toolFieldIsSemanticallyRequired(field reflect.StructField) bool {
+	validateTag := strings.ToLower(strings.TrimSpace(field.Tag.Get("validate")))
+	return strings.Contains(validateTag, "required")
+}
+
+func coerceToolArgValue(value interface{}, targetType reflect.Type, required bool) (interface{}, error) {
 	if targetType.Kind() == reflect.Ptr {
 		if value == nil {
 			return nil, nil
 		}
-		return coerceToolArgValue(value, targetType.Elem())
+		return coerceToolArgValue(value, targetType.Elem(), required)
 	}
 
 	if targetType.Kind() != reflect.Bool {

@@ -3,6 +3,7 @@ package cs_ai
 import (
 	"context"
 	"fmt"
+	"sort"
 	"time"
 
 	"go.mongodb.org/mongo-driver/bson"
@@ -95,9 +96,10 @@ func (m *MongoStorageProvider) GetSessionMessages(ctx context.Context, sessionID
 	defer cancel()
 
 	var sessionDoc struct {
-		SessionID string    `bson:"session_id"`
-		Messages  []Message `bson:"messages"`
-		ExpiresAt time.Time `bson:"expires_at"`
+		SessionID string                 `bson:"session_id"`
+		Messages  []Message              `bson:"messages"`
+		State     map[string]interface{} `bson:"state"`
+		ExpiresAt time.Time              `bson:"expires_at"`
 	}
 
 	findOpts := options.FindOne().SetSort(bson.D{{Key: "updated_at", Value: -1}})
@@ -124,20 +126,9 @@ func (m *MongoStorageProvider) SaveSessionMessages(ctx context.Context, sessionI
 	ctx, cancel := context.WithTimeout(ctx, m.config.Timeout)
 	defer cancel()
 
-	EnsureAutoIncrementMessageIDs(messages)
-
-	// Prepare messages for storage (populate ContentMap for JSON content)
-	for i := range messages {
-		messages[i].PrepareForStorage()
-	}
-
-	expiresAt := time.Now().Add(ttl)
-
-	sessionDoc := bson.M{
-		"session_id": sessionID,
-		"messages":   messages,
-		"expires_at": expiresAt,
-		"updated_at": time.Now(),
+	sessionDoc, err := buildMongoSessionMessagesDocument(sessionID, messages, ttl)
+	if err != nil {
+		return err
 	}
 
 	// Use upsert to create or update session
@@ -145,12 +136,70 @@ func (m *MongoStorageProvider) SaveSessionMessages(ctx context.Context, sessionI
 	filter := bson.M{"session_id": sessionID}
 	update := bson.M{"$set": sessionDoc}
 
-	_, err := m.collection.UpdateMany(ctx, filter, update, opts)
+	_, err = m.collection.UpdateOne(ctx, filter, update, opts)
 	if err != nil {
 		return fmt.Errorf("failed to save session messages: %w", err)
 	}
 
 	return nil
+}
+
+func buildMongoSessionMessagesDocument(sessionID string, messages []Message, ttl time.Duration) (bson.M, error) {
+	EnsureAutoIncrementMessageIDs(messages)
+
+	for i := range messages {
+		messages[i].PrepareForStorage()
+	}
+
+	expiresAt := time.Now().Add(ttl)
+	sessionDoc := bson.M{
+		"session_id": sessionID,
+		"messages":   messages,
+		"expires_at": expiresAt,
+		"updated_at": time.Now(),
+	}
+
+	if _, err := bson.Marshal(sessionDoc); err != nil {
+		return nil, fmt.Errorf("failed to encode session messages for mongo: %w", err)
+	}
+
+	return sessionDoc, nil
+}
+
+func NormalizeMongoDocumentForComparison(value interface{}) interface{} {
+	switch v := value.(type) {
+	case map[string]interface{}:
+		keys := make([]string, 0, len(v))
+		for key := range v {
+			keys = append(keys, key)
+		}
+		sort.Strings(keys)
+		normalized := make(map[string]interface{}, len(v))
+		for _, key := range keys {
+			normalized[key] = NormalizeMongoDocumentForComparison(v[key])
+		}
+		return normalized
+	case bson.M:
+		converted := make(map[string]interface{}, len(v))
+		for key, inner := range v {
+			converted[key] = NormalizeMongoDocumentForComparison(inner)
+		}
+		return NormalizeMongoDocumentForComparison(converted)
+	case []interface{}:
+		normalized := make([]interface{}, len(v))
+		for i := range v {
+			normalized[i] = NormalizeMongoDocumentForComparison(v[i])
+		}
+		return normalized
+	case primitive.A:
+		normalized := make([]interface{}, len(v))
+		for i := range v {
+			normalized[i] = NormalizeMongoDocumentForComparison(v[i])
+		}
+		return normalized
+	default:
+		return v
+	}
 }
 
 // DeleteSession deletes a session from MongoDB
@@ -172,9 +221,10 @@ func (m *MongoStorageProvider) GetSystemMessages(ctx context.Context, sessionID 
 	defer cancel()
 
 	var sessionDoc struct {
-		SessionID      string    `bson:"session_id"`
-		SystemMessages []Message `bson:"system_messages"`
-		ExpiresAt      time.Time `bson:"expires_at"`
+		SessionID      string                 `bson:"session_id"`
+		SystemMessages []Message              `bson:"system_messages"`
+		State          map[string]interface{} `bson:"state"`
+		ExpiresAt      time.Time              `bson:"expires_at"`
 	}
 
 	findOpts := options.FindOne().SetSort(bson.D{{Key: "updated_at", Value: -1}})
@@ -214,9 +264,61 @@ func (m *MongoStorageProvider) SaveSystemMessages(ctx context.Context, sessionID
 		},
 	}
 
-	_, err := m.collection.UpdateMany(ctx, filter, update, opts)
+	_, err := m.collection.UpdateOne(ctx, filter, update, opts)
 	if err != nil {
 		return fmt.Errorf("failed to save system messages: %w", err)
+	}
+
+	return nil
+}
+
+func (m *MongoStorageProvider) GetSessionState(ctx context.Context, sessionID string) (map[string]interface{}, error) {
+	ctx, cancel := context.WithTimeout(ctx, m.config.Timeout)
+	defer cancel()
+
+	var sessionDoc struct {
+		SessionID string                 `bson:"session_id"`
+		State     map[string]interface{} `bson:"state"`
+		ExpiresAt time.Time              `bson:"expires_at"`
+	}
+
+	findOpts := options.FindOne().SetSort(bson.D{{Key: "updated_at", Value: -1}})
+	err := m.collection.FindOne(ctx, bson.M{"session_id": sessionID}, findOpts).Decode(&sessionDoc)
+	if err != nil {
+		if err == mongo.ErrNoDocuments {
+			return map[string]interface{}{}, nil
+		}
+		return nil, fmt.Errorf("failed to get session state: %w", err)
+	}
+
+	if time.Now().After(sessionDoc.ExpiresAt) {
+		_, _ = m.collection.DeleteMany(ctx, bson.M{"session_id": sessionID})
+		return map[string]interface{}{}, nil
+	}
+
+	return cloneSessionStateMap(sessionDoc.State), nil
+}
+
+func (m *MongoStorageProvider) SaveSessionState(ctx context.Context, sessionID string, state map[string]interface{}, ttl time.Duration) error {
+	ctx, cancel := context.WithTimeout(ctx, m.config.Timeout)
+	defer cancel()
+
+	expiresAt := time.Now().Add(ttl)
+
+	opts := options.Update().SetUpsert(true)
+	filter := bson.M{"session_id": sessionID}
+	update := bson.M{
+		"$set": bson.M{
+			"session_id": sessionID,
+			"state":      cloneSessionStateMap(state),
+			"expires_at": expiresAt,
+			"updated_at": time.Now(),
+		},
+	}
+
+	_, err := m.collection.UpdateOne(ctx, filter, update, opts)
+	if err != nil {
+		return fmt.Errorf("failed to save session state: %w", err)
 	}
 
 	return nil

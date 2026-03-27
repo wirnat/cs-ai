@@ -190,7 +190,11 @@ func (c *CsAI) exec(
 	}
 
 	// ambil pesan lama (jika ada)
-	oldMessages, _ := c.GetSessionMessages(sessionID) // error bisa diabaikan
+	oldMessages, err := c.GetSessionMessages(sessionID)
+	if err != nil {
+		fmt.Printf("Warning: Failed to load session messages: %v\n", err)
+	}
+
 	messages := make(Messages, 0)
 	if oldMessages != nil {
 		messages = append(messages, oldMessages...)
@@ -249,7 +253,9 @@ func (c *CsAI) exec(
 			messages.Add(aiResponse)
 		}
 
-		_, _ = c.SaveSessionMessages(sessionID, messages) // simpan percakapan
+		if _, saveErr := c.SaveSessionMessages(sessionID, messages); saveErr != nil {
+			fmt.Printf("Warning: Failed to save session messages: %v\n", saveErr)
+		} // simpan percakapan
 		return withAggregatedUsage(aiResponse), nil
 	}
 
@@ -272,7 +278,9 @@ func (c *CsAI) exec(
 			loopFallback := buildToolLoopLimitFallbackMessage(userMessage.ParticipantName, successfulToolCalls > 0)
 			loopFallback = withAggregatedUsage(loopFallback)
 			messages.Add(loopFallback)
-			_, _ = c.SaveSessionMessages(sessionID, messages)
+			if _, saveErr := c.SaveSessionMessages(sessionID, messages); saveErr != nil {
+				fmt.Printf("Warning: Failed to save session messages: %v\n", saveErr)
+			}
 			return loopFallback, nil
 		}
 
@@ -358,21 +366,27 @@ func (c *CsAI) exec(
 			safeResponse := buildToolSafetyFallbackMessage(userMessage.ParticipantName)
 			safeResponse = withAggregatedUsage(safeResponse)
 			messages.Add(safeResponse)
-			_, _ = c.SaveSessionMessages(sessionID, messages)
+			if _, saveErr := c.SaveSessionMessages(sessionID, messages); saveErr != nil {
+				fmt.Printf("Warning: Failed to save session messages: %v\n", saveErr)
+			}
 			return safeResponse, nil
 		}
 		if repeatedNoProgressLoops >= maxRepeatedNoProgressLoops {
 			safeResponse := buildToolNoProgressFallbackMessage(userMessage.ParticipantName, successfulToolCalls > 0)
 			safeResponse = withAggregatedUsage(safeResponse)
 			messages.Add(safeResponse)
-			_, _ = c.SaveSessionMessages(sessionID, messages)
+			if _, saveErr := c.SaveSessionMessages(sessionID, messages); saveErr != nil {
+				fmt.Printf("Warning: Failed to save session messages: %v\n", saveErr)
+			}
 			return safeResponse, nil
 		}
 		if consecutiveNoProgressLoops >= maxConsecutiveNoProgressLoops {
 			safeResponse := buildToolNoProgressFallbackMessage(userMessage.ParticipantName, successfulToolCalls > 0)
 			safeResponse = withAggregatedUsage(safeResponse)
 			messages.Add(safeResponse)
-			_, _ = c.SaveSessionMessages(sessionID, messages)
+			if _, saveErr := c.SaveSessionMessages(sessionID, messages); saveErr != nil {
+				fmt.Printf("Warning: Failed to save session messages: %v\n", saveErr)
+			}
 			return safeResponse, nil
 		}
 
@@ -397,12 +411,16 @@ func (c *CsAI) exec(
 		safeResponse := buildToolSafetyFallbackMessage(userMessage.ParticipantName)
 		safeResponse = withAggregatedUsage(safeResponse)
 		messages.Add(safeResponse)
-		_, _ = c.SaveSessionMessages(sessionID, messages)
+		if _, saveErr := c.SaveSessionMessages(sessionID, messages); saveErr != nil {
+			fmt.Printf("Warning: Failed to save session messages: %v\n", saveErr)
+		}
 		return safeResponse, nil
 	}
 
 	// simpan semua percakapan ke redis setelah selesai
-	_, _ = c.SaveSessionMessages(sessionID, messages)
+	if _, saveErr := c.SaveSessionMessages(sessionID, messages); saveErr != nil {
+		fmt.Printf("Warning: Failed to save session messages: %v\n", saveErr)
+	}
 
 	// Validasi response type jika diatur
 	if c.options.ResponseType != "" && !validateResponseType(aiResponse.Content, c.options.ResponseType) {
@@ -422,7 +440,9 @@ func (c *CsAI) exec(
 		messages.Add(aiResponse)
 
 		// Simpan ulang percakapan setelah format diperbaiki
-		_, _ = c.SaveSessionMessages(sessionID, messages)
+		if _, saveErr := c.SaveSessionMessages(sessionID, messages); saveErr != nil {
+			fmt.Printf("Warning: Failed to save session messages: %v\n", saveErr)
+		}
 	}
 
 	return withAggregatedUsage(aiResponse), nil
@@ -454,8 +474,25 @@ func (c *CsAI) sendWithIntentsForSession(
 	runtimeIntents []Intent,
 	additionalSystemMessage ...string,
 ) (content Message, err error) {
+	resolvedSystemMessages := additionalSystemMessage
+	if sessionID != "" && len(resolvedSystemMessages) == 0 {
+		if persisted, stateErr := c.GetSystemMessages(sessionID); stateErr == nil && len(persisted) > 0 {
+			resolvedSystemMessages = make([]string, 0, len(persisted))
+			for _, msg := range persisted {
+				if msg.Role != System {
+					continue
+				}
+				content := strings.TrimSpace(msg.Content)
+				if content == "" {
+					continue
+				}
+				resolvedSystemMessages = append(resolvedSystemMessages, content)
+			}
+		}
+	}
+
 	// messages dari setup model
-	systemMessage := c.getModelMessageWithIntents(runtimeIntents, additionalSystemMessage...)
+	systemMessage := c.getModelMessageWithIntents(runtimeIntents, resolvedSystemMessages...)
 
 	var roleMessage []map[string]interface{}
 	//===============================USER MESSAGE=================================
@@ -475,6 +512,13 @@ func (c *CsAI) sendWithIntentsForSession(
 		if err2 != nil {
 			return Message{}, err2
 		}
+		schemaOptions := ToolSchemaOptions{}
+		if provider, ok := intent.(ToolSchemaOptionsProvider); ok {
+			schemaOptions = provider.ToolSchemaOptions()
+		}
+		if len(schemaOptions.Examples) > 0 {
+			param["examples"] = cloneInterface(schemaOptions.Examples)
+		}
 		function = append(function, map[string]interface{}{
 			"type": "function",
 			"function": map[string]interface{}{
@@ -482,6 +526,7 @@ func (c *CsAI) sendWithIntentsForSession(
 				"description": strings.Join(intent.Description(), ", "),
 				"parameters":  param,
 			},
+			"_csai_strict": schemaOptions.Strict,
 		})
 	}
 	return c.sendWithModelCandidates(ctx, sessionID, roleMessage, function)

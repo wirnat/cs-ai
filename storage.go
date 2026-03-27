@@ -16,6 +16,10 @@ type StorageProvider interface {
 	GetSystemMessages(ctx context.Context, sessionID string) ([]Message, error)
 	SaveSystemMessages(ctx context.Context, sessionID string, messages []Message, ttl time.Duration) error
 
+	// Session state management (structured conversational state)
+	GetSessionState(ctx context.Context, sessionID string) (map[string]interface{}, error)
+	SaveSessionState(ctx context.Context, sessionID string, state map[string]interface{}, ttl time.Duration) error
+
 	// Learning data management
 	SaveLearningData(ctx context.Context, data LearningData) error
 	GetLearningData(ctx context.Context, days int) ([]LearningData, error)

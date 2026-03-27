@@ -121,7 +121,7 @@ func TestExecWithToolCodes_EmptyAllowedDisablesTools(t *testing.T) {
 	defer mu.Unlock()
 	require.NotNil(t, capturedBody)
 	require.Equal(t, "none", capturedBody["tool_choice"])
-	require.Nil(t, capturedBody["tools"])
+	require.Equal(t, []interface{}{}, capturedBody["tools"])
 }
 
 func TestExecWithToolCodes_BootstrapSkipsUnavailableRuntimeIntent(t *testing.T) {
