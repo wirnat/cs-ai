@@ -145,6 +145,22 @@ func (c *CsAI) exec(
 	runtimeIntents []Intent,
 	additionalSystemMessage ...string,
 ) (Message, error) {
+	runtime := c.resolvedAgentRuntimeOptions()
+	switch runtime.Strategy {
+	case ContextStrategyCompactBackend, ContextStrategyCompactHybrid:
+		return c.execCompact(ctx, sessionID, userMessage, runtimeIntents, additionalSystemMessage...)
+	default:
+		return c.execLegacy(ctx, sessionID, userMessage, runtimeIntents, additionalSystemMessage...)
+	}
+}
+
+func (c *CsAI) execLegacy(
+	ctx context.Context,
+	sessionID string,
+	userMessage UserMessage,
+	runtimeIntents []Intent,
+	additionalSystemMessage ...string,
+) (Message, error) {
 	usageAggregate := DeepSeekUsage{}
 	appendUsage := func(msg Message) {
 		if msg.Usage == nil {
@@ -160,7 +176,6 @@ func (c *CsAI) exec(
 		msg.AggregatedUsage = &normalized
 		return msg
 	}
-
 	// Security check
 	userID := userMessage.ParticipantName
 	if userID == "" {

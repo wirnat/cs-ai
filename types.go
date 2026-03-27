@@ -35,6 +35,9 @@ type Options struct {
 	// === First-turn bootstrap options ===
 	FirstTurnBootstrap *FirstTurnBootstrapOptions // Optional server-side bootstrap intents for first user turn
 
+	// === Injectable agent runtime options ===
+	AgentRuntime *AgentRuntimeOptions // Optional compact runtime with injectable summary/identifier/answer agents
+
 	// === Auth & Model Failover ===
 	AuthManager    AuthManager // Optional auth resolver (OAuth/profile rotation)
 	ModelFallbacks []Modeler   // Candidate fallback models in order
