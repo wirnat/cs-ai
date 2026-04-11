@@ -16,6 +16,11 @@ const defaultHTTPLogDir = "log/cs-ai-http"
 type HTTPLogEntry struct {
 	Timestamp    string            `json:"timestamp"`
 	Direction    string            `json:"direction"` // "REQUEST" or "RESPONSE"
+	SessionID    string            `json:"session_id,omitempty"`
+	TurnID       string            `json:"turn_id,omitempty"`
+	Stage        string            `json:"stage,omitempty"`
+	RequestKind  string            `json:"request_kind,omitempty"`
+	Hop          int               `json:"hop,omitempty"`
 	URL          string            `json:"url,omitempty"`
 	Method       string            `json:"method,omitempty"`
 	StatusCode   int               `json:"status_code,omitempty"`
@@ -25,6 +30,15 @@ type HTTPLogEntry struct {
 	DurationMs   int64             `json:"duration_ms,omitempty"`
 	ModelName    string            `json:"model_name,omitempty"`
 	ProviderName string            `json:"provider_name,omitempty"`
+}
+
+type HTTPLogMetadata struct {
+	SessionID    string
+	TurnID       string
+	Stage        string
+	RequestKind  string
+	Hop          int
+	ProviderName string
 }
 
 // HTTPLogger writes structured HTTP logs to disk.
@@ -60,6 +74,10 @@ func resolveHTTPLogDir() string {
 
 // LogRequest records an outgoing API request.
 func (l *HTTPLogger) LogRequest(method, url string, headers map[string]string, body []byte, modelName, providerName string) {
+	l.LogRequestWithMetadata(method, url, headers, body, modelName, providerName, HTTPLogMetadata{})
+}
+
+func (l *HTTPLogger) LogRequestWithMetadata(method, url string, headers map[string]string, body []byte, modelName, providerName string, meta HTTPLogMetadata) {
 	if l == nil {
 		return
 	}
@@ -81,12 +99,17 @@ func (l *HTTPLogger) LogRequest(method, url string, headers map[string]string, b
 	entry := HTTPLogEntry{
 		Timestamp:    time.Now().Format(time.RFC3339Nano),
 		Direction:    "REQUEST",
+		SessionID:    strings.TrimSpace(meta.SessionID),
+		TurnID:       strings.TrimSpace(meta.TurnID),
+		Stage:        strings.TrimSpace(meta.Stage),
+		RequestKind:  strings.TrimSpace(meta.RequestKind),
+		Hop:          meta.Hop,
 		URL:          url,
 		Method:       method,
 		Headers:      safeHeaders,
 		Body:         compactOrRaw(body),
 		ModelName:    modelName,
-		ProviderName: providerName,
+		ProviderName: firstNonEmptyString(strings.TrimSpace(meta.ProviderName), providerName),
 	}
 
 	l.mu.Lock()
@@ -96,18 +119,29 @@ func (l *HTTPLogger) LogRequest(method, url string, headers map[string]string, b
 
 // LogResponse records an incoming API response.
 func (l *HTTPLogger) LogResponse(statusCode int, headers map[string]string, body []byte, durationMs int64, errMsg string) {
+	l.LogResponseWithMetadata(statusCode, headers, body, durationMs, errMsg, HTTPLogMetadata{})
+}
+
+func (l *HTTPLogger) LogResponseWithMetadata(statusCode int, headers map[string]string, body []byte, durationMs int64, errMsg string, meta HTTPLogMetadata) {
 	if l == nil {
 		return
 	}
 
 	entry := HTTPLogEntry{
-		Timestamp:  time.Now().Format(time.RFC3339Nano),
-		Direction:  "RESPONSE",
-		StatusCode: statusCode,
-		Headers:    headers,
-		Body:       compactOrRaw(body),
-		DurationMs: durationMs,
-		Error:      errMsg,
+		Timestamp:    time.Now().Format(time.RFC3339Nano),
+		Direction:    "RESPONSE",
+		SessionID:    strings.TrimSpace(meta.SessionID),
+		TurnID:       strings.TrimSpace(meta.TurnID),
+		Stage:        strings.TrimSpace(meta.Stage),
+		RequestKind:  strings.TrimSpace(meta.RequestKind),
+		Hop:          meta.Hop,
+		StatusCode:   statusCode,
+		Headers:      headers,
+		Body:         compactOrRaw(body),
+		DurationMs:   durationMs,
+		Error:        errMsg,
+		ModelName:    "",
+		ProviderName: strings.TrimSpace(meta.ProviderName),
 	}
 
 	l.mu.Lock()
