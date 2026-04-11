@@ -110,12 +110,7 @@ func (d *DynamoStorageProvider) SaveSessionMessages(ctx context.Context, session
 	ctx, cancel := context.WithTimeout(ctx, d.config.Timeout)
 	defer cancel()
 
-	EnsureAutoIncrementMessageIDs(messages)
-
-	// Prepare messages for storage (populate ContentMap for JSON content)
-	for i := range messages {
-		messages[i].PrepareForStorage()
-	}
+	storedMessages := cloneMessagesForStorage(messages)
 
 	expiresAt := time.Now().Add(ttl).Unix()
 	updatedAt := time.Now().Unix()
@@ -127,7 +122,7 @@ func (d *DynamoStorageProvider) SaveSessionMessages(ctx context.Context, session
 
 	session := DynamoDBSession{
 		SessionID: sessionID,
-		Messages:  messages,
+		Messages:  storedMessages,
 		ExpiresAt: expiresAt,
 		UpdatedAt: updatedAt,
 	}

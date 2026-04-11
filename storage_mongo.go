@@ -145,18 +145,15 @@ func (m *MongoStorageProvider) SaveSessionMessages(ctx context.Context, sessionI
 }
 
 func buildMongoSessionMessagesDocument(sessionID string, messages []Message, ttl time.Duration) (bson.M, error) {
-	EnsureAutoIncrementMessageIDs(messages)
-
-	for i := range messages {
-		messages[i].PrepareForStorage()
-	}
-
+	sessionTotalUsage := calculateSessionTotalUsage(messages)
+	storedMessages := cloneMessagesForStorage(messages)
 	expiresAt := time.Now().Add(ttl)
 	sessionDoc := bson.M{
-		"session_id": sessionID,
-		"messages":   messages,
-		"expires_at": expiresAt,
-		"updated_at": time.Now(),
+		"session_id":          sessionID,
+		"messages":            storedMessages,
+		"session_total_usage": sessionTotalUsage,
+		"expires_at":          expiresAt,
+		"updated_at":          time.Now(),
 	}
 
 	if _, err := bson.Marshal(sessionDoc); err != nil {
@@ -164,6 +161,19 @@ func buildMongoSessionMessagesDocument(sessionID string, messages []Message, ttl
 	}
 
 	return sessionDoc, nil
+}
+
+func calculateSessionTotalUsage(messages []Message) DeepSeekUsage {
+	total := DeepSeekUsage{}
+	for _, msg := range messages {
+		switch {
+		case msg.AggregatedUsage != nil && !msg.AggregatedUsage.IsZero():
+			total = total.Add(*msg.AggregatedUsage)
+		case msg.Usage != nil && !msg.Usage.IsZero():
+			total = total.Add(*msg.Usage)
+		}
+	}
+	return total
 }
 
 func NormalizeMongoDocumentForComparison(value interface{}) interface{} {

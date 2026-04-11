@@ -68,17 +68,12 @@ func (m *InMemoryStorageProvider) SaveSessionMessages(ctx context.Context, sessi
 		ttl = 12 * time.Hour // Default fallback
 	}
 
-	EnsureAutoIncrementMessageIDs(messages)
-
-	// Prepare messages for storage (populate ContentMap for JSON content)
-	for i := range messages {
-		messages[i].PrepareForStorage()
-	}
+	storedMessages := cloneMessagesForStorage(messages)
 
 	now := time.Now()
 	session := &MemorySession{
 		SessionID: sessionID,
-		Messages:  messages,
+		Messages:  storedMessages,
 		TTL:       now.Add(ttl),
 		UpdatedAt: now,
 	}

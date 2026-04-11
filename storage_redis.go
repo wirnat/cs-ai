@@ -58,14 +58,9 @@ func (r *RedisStorageProvider) GetSessionMessages(ctx context.Context, sessionID
 func (r *RedisStorageProvider) SaveSessionMessages(ctx context.Context, sessionID string, messages []Message, ttl time.Duration) error {
 	key := fmt.Sprintf("ai:session:%s", sessionID)
 
-	EnsureAutoIncrementMessageIDs(messages)
+	storedMessages := cloneMessagesForStorage(messages)
 
-	// Prepare messages for storage (populate ContentMap for JSON content)
-	for i := range messages {
-		messages[i].PrepareForStorage()
-	}
-
-	data, err := json.Marshal(messages)
+	data, err := json.Marshal(storedMessages)
 	if err != nil {
 		return fmt.Errorf("failed to marshal session messages: %v", err)
 	}
