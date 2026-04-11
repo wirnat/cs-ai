@@ -109,3 +109,41 @@ func TestGetModelMessageIncludesWhitelistedTools(t *testing.T) {
 
 	assert.True(t, found, "expected tool whitelist instruction in system messages")
 }
+
+func TestExtractToolFollowUpCodes_SkipWhenNextActionNeedsUserInput(t *testing.T) {
+	content := `{
+		"status":"OFFER_PRICE_GROUP",
+		"next_action":"ask_price_option",
+		"instruction":"Setelah customer pilih, panggil check-availability lagi dengan price_option=nominal."
+	}`
+
+	codes, instruction, ok := extractToolFollowUpCodes(content, []string{"check-availability"})
+	assert.False(t, ok)
+	assert.Nil(t, codes)
+	assert.Empty(t, instruction)
+}
+
+func TestExtractToolFollowUpCodes_SkipWhenNextActionContainsInputOrRetry(t *testing.T) {
+	content := `{
+		"status":"ERROR",
+		"next_action":"recheck_availability_or_input",
+		"instruction":"Panggil check-availability lagi untuk validasi payload."
+	}`
+
+	codes, instruction, ok := extractToolFollowUpCodes(content, []string{"check-availability"})
+	assert.False(t, ok)
+	assert.Nil(t, codes)
+	assert.Empty(t, instruction)
+}
+
+func TestExtractToolFollowUpCodes_InferFromInstructionWhenNoNextAction(t *testing.T) {
+	content := `{
+		"status":"ERROR",
+		"instruction":"Panggil intent service-catalog terlebih dahulu untuk mencari service_uid yang valid."
+	}`
+
+	codes, instruction, ok := extractToolFollowUpCodes(content, []string{"service-catalog", "check-availability"})
+	require.True(t, ok)
+	assert.Equal(t, []string{"service-catalog"}, codes)
+	assert.Contains(t, instruction, "service-catalog")
+}

@@ -220,3 +220,21 @@ func TestExecWithToolCodesAndIntents_IncludesAdditionalRuntimeIntents(t *testing
 	}
 	require.ElementsMatch(t, []string{"tool-a", "custom-tool-1"}, gotNames)
 }
+
+func TestGetRegisteredToolCodes_AllWhenAllowedNil(t *testing.T) {
+	cs := newTestCsAIWithInMemoryStorage(t)
+	cs.Add(&runtimeIntentStub{code: "Tool-A"})
+	cs.Add(&runtimeIntentStub{code: "tool-b"})
+
+	got := cs.GetRegisteredToolCodes(nil)
+	require.Equal(t, []string{"tool-a", "tool-b"}, got)
+}
+
+func TestGetRegisteredToolCodes_RespectsAllowedSubset(t *testing.T) {
+	cs := newTestCsAIWithInMemoryStorage(t)
+	cs.Add(&runtimeIntentStub{code: "tool-a"})
+	cs.Add(&runtimeIntentStub{code: "tool-b"})
+
+	got := cs.GetRegisteredToolCodes([]string{"  TOOL-B  "})
+	require.Equal(t, []string{"tool-b"}, got)
+}

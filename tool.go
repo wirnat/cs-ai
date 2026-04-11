@@ -147,10 +147,12 @@ func generateToolDefinitionHash(intent Intent) (string, error) {
 	}
 
 	// Create tool definition structure
+	metadata := resolveToolMetadata(intent)
 	toolDef := map[string]interface{}{
 		"name":        intent.Code(),
 		"description": strings.Join(intent.Description(), ", "),
 		"parameters":  param,
+		"metadata":    metadata,
 	}
 
 	// Convert to JSON for consistent hashing
