@@ -13,22 +13,25 @@ type Role string
 // consts role
 const (
 	System    Role = "system"
+	Developer Role = "developer"
 	User      Role = "user"
 	Assistant Role = "assistant"
 	Tool      Role = "tool"
 )
 
 type Message struct {
-	Content         string         `json:"content" bson:"content"`
-	ContentMap      interface{}    `json:"content_map,omitempty" bson:"content_map,omitempty"`         // Auto-populated when Content is JSON
-	ID              int            `json:"id,omitempty" bson:"id,omitempty" dynamodbav:"id,omitempty"` // 1-based incremental ID per session
-	Name            string         `json:"name" bson:"name"`
-	Role            Role           `json:"role" bson:"role"`
-	ToolCalls       []ToolCall     `json:"tool_calls" bson:"tool_calls"`
-	ToolCallID      string         `json:"tool_call_id" bson:"tool_call_id"`
-	Model           string         `json:"model,omitempty" bson:"model,omitempty"`
-	Usage           *DeepSeekUsage `json:"usage,omitempty" bson:"usage,omitempty"`
-	AggregatedUsage *DeepSeekUsage `json:"aggregated_usage,omitempty" bson:"aggregated_usage,omitempty"`
+	Content         string                     `json:"content" bson:"content"`
+	ContentMap      interface{}                `json:"content_map,omitempty" bson:"content_map,omitempty"`         // Auto-populated when Content is JSON
+	ID              int                        `json:"id,omitempty" bson:"id,omitempty" dynamodbav:"id,omitempty"` // 1-based incremental ID per session
+	Name            string                     `json:"name" bson:"name"`
+	Role            Role                       `json:"role" bson:"role"`
+	ToolCalls       []ToolCall                 `json:"tool_calls" bson:"tool_calls"`
+	ToolCallID      string                     `json:"tool_call_id" bson:"tool_call_id"`
+	Model           string                     `json:"model,omitempty" bson:"model,omitempty"`
+	ResponseID      string                     `json:"response_id,omitempty" bson:"response_id,omitempty"`
+	Usage           *DeepSeekUsage             `json:"usage,omitempty" bson:"usage,omitempty"`
+	AggregatedUsage *DeepSeekUsage             `json:"aggregated_usage,omitempty" bson:"aggregated_usage,omitempty"`
+	Reasoning       *ResponseReasoningMetadata `json:"reasoning,omitempty" bson:"reasoning,omitempty"`
 }
 
 type DeepSeekPromptTokensDetails struct {
@@ -42,6 +45,7 @@ type DeepSeekUsage struct {
 	PromptTokensDetails   DeepSeekPromptTokensDetails `json:"prompt_tokens_details,omitempty" bson:"prompt_tokens_details,omitempty"`
 	PromptCacheHitTokens  int64                       `json:"prompt_cache_hit_tokens,omitempty" bson:"prompt_cache_hit_tokens,omitempty"`
 	PromptCacheMissTokens int64                       `json:"prompt_cache_miss_tokens,omitempty" bson:"prompt_cache_miss_tokens,omitempty"`
+	Reasoning             ReasoningUsage              `json:"reasoning,omitempty" bson:"reasoning,omitempty"`
 }
 
 func (u DeepSeekUsage) IsZero() bool {
@@ -50,7 +54,10 @@ func (u DeepSeekUsage) IsZero() bool {
 		u.TotalTokens == 0 &&
 		u.PromptTokensDetails.CachedTokens == 0 &&
 		u.PromptCacheHitTokens == 0 &&
-		u.PromptCacheMissTokens == 0
+		u.PromptCacheMissTokens == 0 &&
+		u.Reasoning.Tokens == 0 &&
+		u.Reasoning.CachedContextTokens == 0 &&
+		u.Reasoning.PersistedContextTokens == 0
 }
 
 func (u DeepSeekUsage) Normalize() DeepSeekUsage {
@@ -61,6 +68,9 @@ func (u DeepSeekUsage) Normalize() DeepSeekUsage {
 	normalized.PromptTokensDetails.CachedTokens = clampUsageToken(normalized.PromptTokensDetails.CachedTokens)
 	normalized.PromptCacheHitTokens = clampUsageToken(normalized.PromptCacheHitTokens)
 	normalized.PromptCacheMissTokens = clampUsageToken(normalized.PromptCacheMissTokens)
+	normalized.Reasoning.Tokens = clampUsageToken(normalized.Reasoning.Tokens)
+	normalized.Reasoning.CachedContextTokens = clampUsageToken(normalized.Reasoning.CachedContextTokens)
+	normalized.Reasoning.PersistedContextTokens = clampUsageToken(normalized.Reasoning.PersistedContextTokens)
 
 	if normalized.PromptCacheHitTokens == 0 && normalized.PromptTokensDetails.CachedTokens > 0 {
 		normalized.PromptCacheHitTokens = normalized.PromptTokensDetails.CachedTokens
@@ -96,6 +106,11 @@ func (u DeepSeekUsage) Add(other DeepSeekUsage) DeepSeekUsage {
 		},
 		PromptCacheHitTokens:  a.PromptCacheHitTokens + b.PromptCacheHitTokens,
 		PromptCacheMissTokens: a.PromptCacheMissTokens + b.PromptCacheMissTokens,
+		Reasoning: ReasoningUsage{
+			Tokens:                 a.Reasoning.Tokens + b.Reasoning.Tokens,
+			CachedContextTokens:    a.Reasoning.CachedContextTokens + b.Reasoning.CachedContextTokens,
+			PersistedContextTokens: a.Reasoning.PersistedContextTokens + b.Reasoning.PersistedContextTokens,
+		},
 	}
 }
 
@@ -106,8 +121,8 @@ func clampUsageToken(v int64) int64 {
 	return v
 }
 
-// PrepareForStorage populates ContentMap if Content is valid JSON
-// Call this before saving to storage to enable JSON content as object
+// PrepareForStorage populates ContentMap if Content is valid JSON.
+// Call this before saving to storage to enable JSON content as object.
 func (m *Message) PrepareForStorage() {
 	if m.Content == "" {
 		return
@@ -121,6 +136,28 @@ func (m *Message) PrepareForStorage() {
 			m.ContentMap = parsed
 		}
 	}
+}
+
+// StripInternalMetadataForStorage removes response metadata that is useful for
+// runtime/accounting but should not be persisted inside raw session transcripts.
+func (m *Message) StripInternalMetadataForStorage() {
+	m.ResponseID = ""
+	m.AggregatedUsage = nil
+	m.Reasoning = nil
+}
+
+func cloneMessagesForStorage(messages []Message) []Message {
+	if len(messages) == 0 {
+		return nil
+	}
+
+	cloned := append([]Message(nil), messages...)
+	EnsureAutoIncrementMessageIDs(cloned)
+	for i := range cloned {
+		cloned[i].PrepareForStorage()
+		cloned[i].StripInternalMetadataForStorage()
+	}
+	return cloned
 }
 
 // EnsureAutoIncrementMessageIDs guarantees sequential 1-based message IDs
@@ -182,7 +219,9 @@ func MessageFromResponsesMap(result map[string]interface{}) (Message, error) {
 	if modelName, ok := result["model"].(string); ok {
 		content.Model = strings.TrimSpace(modelName)
 	}
+	content.ResponseID = strings.TrimSpace(toString(result["id"]))
 	content.Usage = parseResponsesUsage(result["usage"])
+	content.Reasoning = parseResponsesReasoningMetadata(result, content.Usage)
 
 	var texts []string
 	directText := strings.TrimSpace(toString(result["output_text"]))
@@ -270,6 +309,8 @@ func (m Message) MessageToMap() (map[string]interface{}, error) {
 	delete(result, "usage")
 	delete(result, "aggregated_usage")
 	delete(result, "model")
+	delete(result, "response_id")
+	delete(result, "reasoning")
 
 	return result, nil
 }
@@ -338,12 +379,113 @@ func parseResponsesUsage(raw interface{}) *DeepSeekUsage {
 	if usage.CompletionTokens == 0 {
 		usage.CompletionTokens = parseUsageInt64(usageMap["completion_tokens"])
 	}
+	if details, ok := usageMap["input_tokens_details"].(map[string]interface{}); ok {
+		usage.PromptTokensDetails.CachedTokens = parseUsageInt64(details["cached_tokens"])
+		usage.Reasoning.CachedContextTokens = parseUsageInt64(details["cached_tokens"])
+		usage.Reasoning.PersistedContextTokens = parseUsageInt64(details["persisted_tokens"])
+	}
+	if details, ok := usageMap["output_tokens_details"].(map[string]interface{}); ok {
+		usage.Reasoning.Tokens = parseUsageInt64(details["reasoning_tokens"])
+	}
+	if usage.Reasoning.Tokens == 0 {
+		usage.Reasoning.Tokens = parseUsageInt64(usageMap["reasoning_tokens"])
+	}
 
 	normalized := usage.Normalize()
 	if normalized.IsZero() {
 		return nil
 	}
 	return &normalized
+}
+
+func parseResponsesReasoningMetadata(result map[string]interface{}, usage *DeepSeekUsage) *ResponseReasoningMetadata {
+	if result == nil {
+		return nil
+	}
+
+	meta := &ResponseReasoningMetadata{
+		PreviousResponseID: strings.TrimSpace(toString(result["previous_response_id"])),
+	}
+	if usage != nil {
+		meta.Usage = usage.Reasoning
+	}
+
+	if reasoningMap, ok := result["reasoning"].(map[string]interface{}); ok {
+		if effort := strings.TrimSpace(toString(reasoningMap["effort"])); effort != "" {
+			meta.EffortUsed = effort
+		}
+		if summary := extractReasoningSummary(reasoningMap["summary"]); summary != "" {
+			meta.Summaries = []ReasoningSummary{{Text: summary}}
+			meta.SummaryText = summary
+		}
+	}
+
+	rawOutput, _ := result["output"].([]interface{})
+	for _, item := range rawOutput {
+		entry, ok := item.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		if strings.ToLower(strings.TrimSpace(toString(entry["type"]))) != "reasoning" {
+			continue
+		}
+		meta.ItemsPresent = true
+		if effort := strings.TrimSpace(toString(entry["effort"])); effort != "" && meta.EffortUsed == "" {
+			meta.EffortUsed = effort
+		}
+		if summary := extractReasoningSummary(entry["summary"]); summary != "" {
+			meta.Summaries = append(meta.Summaries, ReasoningSummary{Text: summary})
+		}
+	}
+
+	if meta.SummaryText == "" && len(meta.Summaries) > 0 {
+		lines := make([]string, 0, len(meta.Summaries))
+		for _, item := range meta.Summaries {
+			if text := strings.TrimSpace(item.Text); text != "" {
+				lines = append(lines, text)
+			}
+		}
+		meta.SummaryText = strings.TrimSpace(strings.Join(lines, "\n"))
+	}
+
+	if meta.SummaryText == "" && meta.EffortUsed == "" && !meta.ItemsPresent && meta.PreviousResponseID == "" && meta.Usage.Tokens == 0 && meta.Usage.CachedContextTokens == 0 && meta.Usage.PersistedContextTokens == 0 {
+		return nil
+	}
+	return meta
+}
+
+func extractReasoningSummary(raw interface{}) string {
+	switch v := raw.(type) {
+	case string:
+		return strings.TrimSpace(v)
+	case []interface{}:
+		lines := make([]string, 0, len(v))
+		for _, item := range v {
+			switch typed := item.(type) {
+			case string:
+				if text := strings.TrimSpace(typed); text != "" {
+					lines = append(lines, text)
+				}
+			case map[string]interface{}:
+				if text := firstNonEmptyString(
+					toString(typed["text"]),
+					toString(typed["summary_text"]),
+					toString(typed["content"]),
+				); strings.TrimSpace(text) != "" {
+					lines = append(lines, strings.TrimSpace(text))
+				}
+			}
+		}
+		return strings.TrimSpace(strings.Join(lines, "\n"))
+	case map[string]interface{}:
+		return firstNonEmptyString(
+			strings.TrimSpace(toString(v["text"])),
+			strings.TrimSpace(toString(v["summary_text"])),
+			strings.TrimSpace(toString(v["content"])),
+		)
+	default:
+		return ""
+	}
 }
 
 func firstNonEmptyString(candidates ...string) string {

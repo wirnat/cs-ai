@@ -13,6 +13,8 @@ const (
 	RedisDB       = 0
 	RedisAddr     = "localhost:6379"
 	RedisPassword = ""
+	HairoModel    = "kr/claude-sonnet-4.5"
+	HairoAPIURL   = "http://localhost:20128/v1/chat/completions"
 )
 
 func main() {
@@ -25,7 +27,7 @@ func main() {
 		Password: RedisPassword,
 	})
 	redis.FlushDB(context.Background())
-	csAI := cs_ai.New(cs_ai.APIKEY, model.NewDeepSeekChat(), cs_ai.Options{
+	csAI := cs_ai.New(cs_ai.APIKEY, model.NewOmniRoute(HairoModel, HairoAPIURL), cs_ai.Options{
 		UseTool:     true,
 		Redis:       redis,
 		LogChatFile: true,

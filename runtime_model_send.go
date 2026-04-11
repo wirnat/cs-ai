@@ -85,13 +85,30 @@ func (c *CsAI) sendWithModel(
 	roleMessage []map[string]interface{},
 	function []map[string]interface{},
 ) (content Message, err error) {
+	return c.sendWithModelReasoning(ctx, sessionID, modelCandidate, roleMessage, function, nil, false)
+}
+
+func (c *CsAI) sendWithModelReasoning(
+	ctx context.Context,
+	sessionID string,
+	modelCandidate Modeler,
+	roleMessage []map[string]interface{},
+	function []map[string]interface{},
+	reasoningOverride *ReasoningConfig,
+	disableContinuity bool,
+) (content Message, err error) {
 	provider := resolveModelProvider(modelCandidate)
 	apiMode := resolveModelAPIMode(modelCandidate)
+	resolvedReasoning := c.prepareReasoningRequest(ctx, sessionID, provider, apiMode, reasoningOverride, disableContinuity)
 
 	// When no AuthManager is configured, fall back to the static API key and
 	// attempt a single request (the original behaviour).
 	if c.options.AuthManager == nil {
-		return c.attemptModelRequest(ctx, sessionID, modelCandidate, provider, apiMode, strings.TrimSpace(c.ApiKey), "", roleMessage, function)
+		content, err = c.attemptModelRequest(ctx, sessionID, modelCandidate, provider, apiMode, strings.TrimSpace(c.ApiKey), "", roleMessage, function, resolvedReasoning)
+		if err == nil {
+			c.persistReasoningState(sessionID, content, resolvedReasoning)
+		}
+		return content, err
 	}
 
 	// --- Profile retry loop ---
@@ -121,7 +138,11 @@ func (c *CsAI) sendWithModel(
 			if attempt == 0 && lastErr == nil && !isOAuthProvider(provider) {
 				staticKey := strings.TrimSpace(c.ApiKey)
 				if staticKey != "" {
-					return c.attemptModelRequest(ctx, sessionID, modelCandidate, provider, apiMode, staticKey, "", roleMessage, function)
+					content, err = c.attemptModelRequest(ctx, sessionID, modelCandidate, provider, apiMode, staticKey, "", roleMessage, function, resolvedReasoning)
+					if err == nil {
+						c.persistReasoningState(sessionID, content, resolvedReasoning)
+					}
+					return content, err
 				}
 			}
 			cause := lastErr
@@ -140,8 +161,9 @@ func (c *CsAI) sendWithModel(
 		}
 		triedProfiles[profileID] = struct{}{}
 
-		content, err = c.attemptModelRequest(ctx, sessionID, modelCandidate, provider, apiMode, authToken, profileID, roleMessage, function)
+		content, err = c.attemptModelRequest(ctx, sessionID, modelCandidate, provider, apiMode, authToken, profileID, roleMessage, function, resolvedReasoning)
 		if err == nil {
+			c.persistReasoningState(sessionID, content, resolvedReasoning)
 			return content, nil
 		}
 		lastErr = err
@@ -176,23 +198,60 @@ func (c *CsAI) attemptModelRequest(
 	profileID string,
 	roleMessage []map[string]interface{},
 	function []map[string]interface{},
+	reasoningRequest *resolvedReasoningRequest,
 ) (Message, error) {
 	if authToken == "" {
 		return Message{}, fmt.Errorf("missing auth token for provider %s", provider)
 	}
 
-	reqBody := buildRequestBodyByAPIMode(apiMode, modelCandidate.ModelName(), roleMessage, function, c.options)
-	result, statusCode, responseHeaders, requestErr := RequestDetailed(modelCandidate.ApiURL(), "POST", reqBody, func(request *http.Request) {
-		request.Header.Set("Authorization", "Bearer "+authToken)
-		if apiMode == APIModeOpenAICodexResponses {
-			// ChatGPT Codex backend requires account routing metadata in headers.
-			if accountID := extractOpenAIChatGPTAccountIDFromJWT(authToken); accountID != "" {
-				request.Header.Set("chatgpt-account-id", accountID)
+	buildConfig := requestBuildConfig{}
+	if reasoningRequest != nil {
+		buildConfig.Reasoning = reasoningRequest.Config
+		buildConfig.PreviousResponseID = reasoningRequest.PreviousResponseID
+	}
+	streamMode := true
+	if apiMode != APIModeOpenAICodexResponses {
+		streamMode = shouldStreamModelRequest(ctx)
+	}
+	buildConfig.Stream = &streamMode
+
+	var (
+		result          map[string]interface{}
+		statusCode      int
+		responseHeaders map[string]string
+		requestErr      error
+		transportWarn   string
+	)
+	streamObserver := c.buildModelStreamObserver(ctx, provider, modelCandidate.ModelName())
+	for {
+		reqBody := buildRequestBodyByAPIMode(apiMode, provider, modelCandidate.ModelName(), roleMessage, function, c.options, buildConfig)
+		reqCtx := WithHTTPLogMetadata(ctx, HTTPLogMetadata{
+			SessionID:    strings.TrimSpace(sessionID),
+			ProviderName: strings.TrimSpace(provider),
+		})
+		result, statusCode, responseHeaders, requestErr = RequestDetailedWithContextAndObserver(reqCtx, modelCandidate.ApiURL(), "POST", reqBody, func(request *http.Request) {
+			request.Header.Set("Authorization", "Bearer "+authToken)
+			if apiMode == APIModeOpenAICodexResponses {
+				// ChatGPT Codex backend requires account routing metadata in headers.
+				if accountID := extractOpenAIChatGPTAccountIDFromJWT(authToken); accountID != "" {
+					request.Header.Set("chatgpt-account-id", accountID)
+				}
+				request.Header.Set("OpenAI-Beta", "responses=experimental")
+				request.Header.Set("originator", "pi")
 			}
-			request.Header.Set("OpenAI-Beta", "responses=experimental")
-			request.Header.Set("originator", "pi")
+		}, streamObserver)
+		if requestErr == nil {
+			break
 		}
-	})
+
+		nextConfig, warning, ok := applyReasoningRequestFallback(requestErr, buildConfig)
+		if !ok {
+			break
+		}
+		buildConfig = nextConfig
+		transportWarn = warning
+	}
+
 	c.recordRateLimitSnapshot(ctx, provider, profileID, statusCode, responseHeaders)
 	if requestErr != nil {
 		reason := classifyFailoverReason(requestErr)
@@ -209,6 +268,9 @@ func (c *CsAI) attemptModelRequest(
 		content, err = MessageFromResponsesMap(result)
 	default:
 		content, err = MessageFromMap(result)
+		if shouldFallbackToResponsesParser(content, result) {
+			content, err = MessageFromResponsesMap(result)
+		}
 	}
 	if err != nil {
 		if c.options.AuthManager != nil && profileID != "" {
@@ -220,8 +282,36 @@ func (c *CsAI) attemptModelRequest(
 	if c.options.AuthManager != nil && profileID != "" {
 		_ = c.options.AuthManager.MarkSuccess(ctx, sessionID, provider, profileID)
 	}
+	if transportWarn != "" {
+		if content.Reasoning == nil {
+			content.Reasoning = &ResponseReasoningMetadata{}
+		}
+		content.Reasoning.TransportWarning = transportWarn
+	}
 
 	return content, nil
+}
+
+func shouldFallbackToResponsesParser(content Message, result map[string]interface{}) bool {
+	if result == nil {
+		return false
+	}
+	if len(content.ToolCalls) > 0 || strings.TrimSpace(content.Content) != "" || strings.TrimSpace(content.ResponseID) != "" {
+		return false
+	}
+	if choices, ok := result["choices"].([]interface{}); ok && len(choices) > 0 {
+		return false
+	}
+	if _, ok := result["output"].([]interface{}); ok {
+		return true
+	}
+	if strings.TrimSpace(toString(result["output_text"])) != "" {
+		return true
+	}
+	if strings.EqualFold(strings.TrimSpace(toString(result["object"])), "response") {
+		return true
+	}
+	return false
 }
 
 func (c *CsAI) recordRateLimitSnapshot(ctx context.Context, provider string, profileID string, statusCode int, headers map[string]string) {
@@ -235,12 +325,179 @@ func (c *CsAI) recordRateLimitSnapshot(ctx context.Context, provider string, pro
 	_ = recorder.RecordRateLimit(ctx, provider, profileID, statusCode, headers)
 }
 
+func (c *CsAI) buildModelStreamObserver(ctx context.Context, provider string, modelName string) RequestStreamObserver {
+	rt := extractStreamRuntime(ctx)
+	if rt == nil {
+		return nil
+	}
+
+	stage := "answer"
+	if stageCtx, ok := extractStageStreaming(ctx); ok {
+		stage = stageName(stageCtx.Stage)
+	}
+
+	emitTextDelta := shouldEmitTextDelta(ctx)
+
+	return func(event RequestStreamEvent) {
+		eventType := strings.TrimSpace(event.EventType)
+
+		switch {
+		case eventType == "response.output_text.delta" && emitTextDelta:
+			delta := strings.TrimSpace(toString(event.Payload["delta"]))
+			if delta == "" {
+				return
+			}
+			emitStreamEvent(ctx, StreamEvent{
+				Stage:     stage,
+				Type:      "llm.text.delta",
+				Status:    "ok",
+				Provider:  strings.TrimSpace(provider),
+				Model:     strings.TrimSpace(modelName),
+				TextDelta: delta,
+			})
+
+		case eventType == "chat.completion.chunk":
+			choices, _ := event.Payload["choices"].([]interface{})
+			for _, choice := range choices {
+				choiceMap, _ := choice.(map[string]interface{})
+				if choiceMap == nil {
+					continue
+				}
+				deltaMap, _ := choiceMap["delta"].(map[string]interface{})
+				if deltaMap == nil {
+					continue
+				}
+
+				if emitTextDelta {
+					deltaText := strings.TrimSpace(toString(deltaMap["content"]))
+					if deltaText != "" {
+						emitStreamEvent(ctx, StreamEvent{
+							Stage:     stage,
+							Type:      "llm.text.delta",
+							Status:    "ok",
+							Provider:  strings.TrimSpace(provider),
+							Model:     strings.TrimSpace(modelName),
+							TextDelta: deltaText,
+						})
+					}
+				}
+
+				reasoningDelta := strings.TrimSpace(toString(deltaMap["reasoning"]))
+				if reasoningDelta == "" {
+					reasoningDelta = strings.TrimSpace(toString(deltaMap["reasoning_content"]))
+				}
+				if reasoningDelta == "" {
+					reasoningDelta = strings.TrimSpace(toString(deltaMap["thinking"]))
+				}
+				if reasoningDelta == "" {
+					continue
+				}
+				emitStreamEvent(ctx, StreamEvent{
+					Stage:     stage,
+					Type:      "llm.reasoning.delta",
+					Status:    "ok",
+					Provider:  strings.TrimSpace(provider),
+					Model:     strings.TrimSpace(modelName),
+					TextDelta: reasoningDelta,
+					Message:   reasoningDelta,
+				})
+			}
+
+		case strings.HasPrefix(eventType, "response.reasoning"):
+			delta := strings.TrimSpace(toString(event.Payload["delta"]))
+			summary := strings.TrimSpace(toString(event.Payload["summary"]))
+			message := delta
+			if message == "" {
+				message = summary
+			}
+			if message == "" {
+				return
+			}
+			emitStreamEvent(ctx, StreamEvent{
+				Stage:     stage,
+				Type:      "llm.reasoning.delta",
+				Status:    "ok",
+				Provider:  strings.TrimSpace(provider),
+				Model:     strings.TrimSpace(modelName),
+				TextDelta: delta,
+				Message:   message,
+			})
+
+		case eventType == "response.output_item.added":
+			item, _ := event.Payload["item"].(map[string]interface{})
+			if item == nil {
+				return
+			}
+			itemType := strings.TrimSpace(toString(item["type"]))
+			if itemType != "function_call" {
+				return
+			}
+			fnName := strings.TrimSpace(toString(item["name"]))
+			if fnName == "" {
+				fnName = strings.TrimSpace(toString(item["function"]))
+			}
+			callID := strings.TrimSpace(toString(item["id"]))
+			if callID == "" {
+				callID = strings.TrimSpace(toString(item["call_id"]))
+			}
+			arguments := strings.TrimSpace(toString(item["arguments"]))
+			msg := fnName
+			if arguments != "" {
+				msg = fnName + "(" + truncateForStreamLog(arguments, 500) + ")"
+			}
+			emitStreamEvent(ctx, StreamEvent{
+				Stage:    stage,
+				Type:     "llm.tool_call.started",
+				Status:   "ok",
+				Provider: strings.TrimSpace(provider),
+				Model:    strings.TrimSpace(modelName),
+				ToolName: fnName,
+				Message:  msg,
+			})
+
+		case eventType == "response.function_call_arguments.delta":
+			delta := strings.TrimSpace(toString(event.Payload["delta"]))
+			if delta == "" {
+				return
+			}
+			emitStreamEvent(ctx, StreamEvent{
+				Stage:     stage,
+				Type:      "llm.tool_call.arguments.delta",
+				Status:    "ok",
+				Provider:  strings.TrimSpace(provider),
+				Model:     strings.TrimSpace(modelName),
+				TextDelta: delta,
+			})
+		}
+	}
+}
+
+func truncateForStreamLog(value string, max int) string {
+	value = strings.TrimSpace(value)
+	if max <= 0 || len(value) <= max {
+		return value
+	}
+	if max <= 3 {
+		return value[:max]
+	}
+	return value[:max-3] + "..."
+}
+
+type requestBuildConfig struct {
+	Reasoning          *ReasoningConfig
+	PreviousResponseID string
+	Stream             *bool
+	DisableThinking    bool
+}
+
 func buildRequestBodyByAPIMode(
 	apiMode string,
+	provider string,
 	modelName string,
 	roleMessage []map[string]interface{},
 	function []map[string]interface{},
 	options Options,
+	buildConfig requestBuildConfig,
 ) map[string]interface{} {
 	toolChoice := "auto"
 	if !options.UseTool || len(function) == 0 {
@@ -267,33 +524,115 @@ func buildRequestBodyByAPIMode(
 	if apiMode == APIModeOpenAICodexResponses {
 		instructions, input := buildCodexResponsesInput(roleMessage)
 		codexTools := buildCodexTools(function)
+		streamMode := true
+		if buildConfig.Stream != nil {
+			streamMode = *buildConfig.Stream
+		}
 
-		return map[string]interface{}{
+		payload := map[string]interface{}{
 			"model":        modelName,
 			"instructions": instructions,
 			"input":        input,
 			"tools":        codexTools,
 			"tool_choice":  toolChoice,
-			"stream":       true,
+			"stream":       streamMode,
 			"store":        false,
 		}
+		if buildConfig.Reasoning != nil {
+			reasoning := map[string]interface{}{}
+			if effort := strings.TrimSpace(string(buildConfig.Reasoning.Effort)); effort != "" {
+				reasoning["effort"] = effort
+			}
+			if summary := strings.TrimSpace(string(buildConfig.Reasoning.Summary)); summary != "" && summary != string(ReasoningSummaryOff) {
+				reasoning["summary"] = summary
+			}
+			if len(reasoning) > 0 {
+				payload["reasoning"] = reasoning
+			}
+		}
+		if previous := strings.TrimSpace(buildConfig.PreviousResponseID); previous != "" {
+			payload["previous_response_id"] = previous
+		}
+		return payload
 	}
 
-	return map[string]interface{}{
+	streamMode := false
+	if options.Streaming != nil {
+		streamMode = options.Streaming.Enabled
+	}
+	if buildConfig.Stream != nil {
+		streamMode = *buildConfig.Stream
+	}
+
+	payload := map[string]interface{}{
 		"model":             modelName,
 		"messages":          roleMessage,
 		"frequency_penalty": frequencyPenalty,
 		"max_tokens":        1200,
 		"presence_penalty":  presencePenalty,
 		"stop":              nil,
-		"stream":            false,
-		"stream_options":    nil,
-		"temperature":       temperature,
-		"top_p":             topP,
-		"tools":             buildChatCompletionTools(function),
-		"tool_choice":       toolChoice,
-		"logprobs":          false,
-		"top_logprobs":      nil,
+		"stream":            streamMode,
+		"stream_options": map[string]interface{}{
+			"include_usage": true,
+		},
+		"temperature":  temperature,
+		"top_p":        topP,
+		"tools":        buildChatCompletionTools(function),
+		"tool_choice":  toolChoice,
+		"logprobs":     false,
+		"top_logprobs": nil,
+	}
+	if !streamMode {
+		payload["stream_options"] = nil
+	}
+	if buildConfig.Reasoning != nil {
+		reasoning := map[string]interface{}{}
+		if effort := strings.TrimSpace(string(buildConfig.Reasoning.Effort)); effort != "" {
+			reasoning["effort"] = effort
+		}
+		if summary := strings.TrimSpace(string(buildConfig.Reasoning.Summary)); summary != "" && summary != string(ReasoningSummaryOff) {
+			reasoning["summary"] = summary
+		}
+		if len(reasoning) > 0 {
+			payload["reasoning"] = reasoning
+		}
+	}
+	if shouldAttachAnthropicThinking(provider, modelName, buildConfig) {
+		payload["thinking"] = buildAnthropicThinkingPayload(buildConfig.Reasoning)
+	}
+	return payload
+}
+
+func shouldAttachAnthropicThinking(provider string, modelName string, buildConfig requestBuildConfig) bool {
+	if buildConfig.DisableThinking || buildConfig.Reasoning == nil {
+		return false
+	}
+	effort := strings.TrimSpace(strings.ToLower(string(buildConfig.Reasoning.Effort)))
+	if effort == "" || effort == string(ReasoningEffortNone) {
+		return false
+	}
+
+	normalizedProvider := strings.TrimSpace(strings.ToLower(provider))
+	normalizedModel := strings.TrimSpace(strings.ToLower(modelName))
+	if normalizedProvider == "omniroute" || normalizedProvider == "anthropic" {
+		return true
+	}
+	return strings.Contains(normalizedModel, "claude")
+}
+
+func buildAnthropicThinkingPayload(reasoning *ReasoningConfig) map[string]interface{} {
+	budgetTokens := 1024
+	if reasoning != nil {
+		switch strings.TrimSpace(strings.ToLower(string(reasoning.Effort))) {
+		case string(ReasoningEffortMinimal), string(ReasoningEffortLow):
+			budgetTokens = 512
+		case string(ReasoningEffortHigh), string(ReasoningEffortXHigh):
+			budgetTokens = 2048
+		}
+	}
+	return map[string]interface{}{
+		"type":          "enabled",
+		"budget_tokens": budgetTokens,
 	}
 }
 
@@ -356,6 +695,13 @@ func buildCodexResponsesInput(roleMessage []map[string]interface{}) (instruction
 					"type":    "function_call_output",
 					"call_id": callID,
 					"output":  content,
+				})
+			}
+		case "developer":
+			if content != "" {
+				input = append(input, map[string]interface{}{
+					"role":    "developer",
+					"content": content,
 				})
 			}
 		default:
@@ -844,6 +1190,115 @@ func resolveModelAPIMode(modelCandidate Modeler) string {
 		}
 	}
 	return APIModeChatCompletions
+}
+
+func (c *CsAI) prepareReasoningRequest(
+	ctx context.Context,
+	sessionID string,
+	provider string,
+	apiMode string,
+	override *ReasoningConfig,
+	disableContinuity bool,
+) *resolvedReasoningRequest {
+	config := c.resolveReasoningConfig(ctx, override, disableContinuity)
+	capabilities := ResolveTransportCapabilities(provider, apiMode)
+	if config == nil {
+		return &resolvedReasoningRequest{
+			Capabilities: capabilities,
+		}
+	}
+
+	request := &resolvedReasoningRequest{
+		Config:       config,
+		Capabilities: capabilities,
+		Enabled:      true,
+	}
+	if config.Continuity == ReasoningContinuityProviderManaged && strings.TrimSpace(sessionID) != "" {
+		state, _, err := c.loadReasoningRuntimeState(sessionID)
+		if err == nil {
+			request.PreviousResponseID = strings.TrimSpace(state.LastResponseID)
+		}
+	}
+	return request
+}
+
+func applyReasoningRequestFallback(err error, current requestBuildConfig) (requestBuildConfig, string, bool) {
+	if !isReasoningCapabilityMismatch(err) {
+		return current, "", false
+	}
+
+	if !current.DisableThinking && mentionsUnsupportedThinking(err) {
+		next := current
+		next.DisableThinking = true
+		return next, "provider menolak blok thinking; request diulang tanpa thinking", true
+	}
+	if strings.TrimSpace(current.PreviousResponseID) != "" && mentionsUnsupportedPreviousResponseID(err) {
+		next := current
+		next.PreviousResponseID = ""
+		return next, "provider menolak previous_response_id; continuity provider dimatikan untuk request ini", true
+	}
+	if current.Reasoning != nil && current.Reasoning.Summary != "" && current.Reasoning.Summary != ReasoningSummaryOff && mentionsUnsupportedReasoningSummary(err) {
+		next := current
+		cloned := *current.Reasoning
+		cloned.Summary = ReasoningSummaryOff
+		next.Reasoning = &cloned
+		return next, "provider menolak reasoning summary; request diulang tanpa summary", true
+	}
+	if current.Reasoning != nil && mentionsUnsupportedReasoning(err) {
+		next := current
+		next.Reasoning = nil
+		next.PreviousResponseID = ""
+		return next, "provider menolak blok reasoning; request diulang tanpa reasoning", true
+	}
+	return current, "", false
+}
+
+func isReasoningCapabilityMismatch(err error) bool {
+	var apiErr *APIRequestError
+	if !errors.As(err, &apiErr) {
+		return false
+	}
+	if apiErr.StatusCode != http.StatusBadRequest && apiErr.StatusCode != http.StatusUnprocessableEntity {
+		return false
+	}
+	return mentionsUnsupportedReasoning(err) ||
+		mentionsUnsupportedReasoningSummary(err) ||
+		mentionsUnsupportedPreviousResponseID(err) ||
+		mentionsUnsupportedThinking(err)
+}
+
+func mentionsUnsupportedReasoning(err error) bool {
+	return containsAllReasoningTokens(err, "reasoning")
+}
+
+func mentionsUnsupportedReasoningSummary(err error) bool {
+	return containsAllReasoningTokens(err, "summary")
+}
+
+func mentionsUnsupportedPreviousResponseID(err error) bool {
+	return containsAllReasoningTokens(err, "previous_response_id") || containsAllReasoningTokens(err, "previous response id")
+}
+
+func mentionsUnsupportedThinking(err error) bool {
+	return containsAllReasoningTokens(err, "thinking")
+}
+
+func containsAllReasoningTokens(err error, needle string) bool {
+	if err == nil {
+		return false
+	}
+	text := strings.ToLower(err.Error())
+	var apiErr *APIRequestError
+	if errors.As(err, &apiErr) {
+		text = strings.ToLower(apiErr.Body + " " + apiErr.Error())
+	}
+	if !strings.Contains(text, strings.ToLower(needle)) {
+		return false
+	}
+	return strings.Contains(text, "unsupported") ||
+		strings.Contains(text, "unknown parameter") ||
+		strings.Contains(text, "unexpected") ||
+		strings.Contains(text, "not allowed")
 }
 
 func classifyFailoverReason(err error) AuthFailureReason {

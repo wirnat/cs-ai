@@ -254,6 +254,12 @@ func (c *CsAI) executeBootstrapCalls(
 
 func extractBootstrapSummary(intentCode string, data interface{}) string {
 	if payload, ok := data.(map[string]interface{}); ok {
+		if display, ok := payload["display"].(string); ok {
+			display = strings.TrimSpace(display)
+			if display != "" {
+				return display
+			}
+		}
 		if summary := extractBootstrapSemanticSQLSummary(payload); summary != "" {
 			return summary
 		}

@@ -5,6 +5,10 @@ CS-AI adalah package Go yang menyediakan interface untuk AI conversation dengan 
 ## 📑 Table of Contents
 
 - [🚀 Fitur Utama](#-fitur-utama)
+- [🆕 Update Arsitektur 2026](#-update-arsitektur-2026)
+- [🤖 Diagram Agent Runtime](#-diagram-agent-runtime)
+- [⚙️ Konfigurasi Terbaru (Compact + Reasoning)](#️-konfigurasi-terbaru-compact--reasoning)
+- [🌊 Streamed Turn API](#-streamed-turn-api)
 - [📦 Storage Providers](#-storage-providers)
 - [🛠️ Installation](#️-installation)
 - [⚡ Quick Reference Card](#-quick-reference-card)
@@ -41,9 +45,186 @@ CS-AI adalah package Go yang menyediakan interface untuk AI conversation dengan 
 - **Intent System**: Powerful intent-based conversation handling
 - **Middleware Support**: Authentication, rate limiting, caching, logging
 - **Tool Function Integration**: Seamless AI tool calling with intent handlers
+- **Multi-Agent Compact Runtime**: strategi `compact_backend` / `compact_hybrid` dengan agent `summary`, `identifier`, `answer`
+- **Injectable Agent Orchestration**: agent bisa diinject, termasuk `InstructionProvider` dan instruksi per stage
+- **Runtime Tool Gating**: dukung `ExecWithToolCodes` untuk membatasi tool per turn agar lebih presisi dan hemat konteks
+- **Reasoning-Safe Support**: `reasoning.effort`, `reasoning summary`, continuity aman, plus graceful fallback saat provider tidak mendukung
+- **Usage Aggregation Per Turn**: `AggregatedUsage` menjumlahkan usage dari seluruh loop tool dalam satu turn
+- **Orchestrated Turn Streaming**: `ExecStream` untuk 1 turn = 1 stream event ke client, dengan loop tool tetap internal backend
 - **Learning Data Storage**: AI model improvement dengan feedback system
 - **Performance Optimization**: Automatic indexing dan connection pooling
 - **Production Ready**: MongoDB dan Redis fully implemented untuk production use
+
+## 🆕 Update Arsitektur 2026
+
+README ini sekarang mengikuti implementasi terbaru `cs-ai`, terutama untuk mode compact multi-agent:
+
+- Strategi runtime sekarang punya 3 mode: `legacy`, `compact_backend`, dan `compact_hybrid`.
+- Pada mode compact, `Identifier Agent` memilih subset tool yang relevan untuk turn saat ini.
+- `Answer Agent` mengeksekusi loop tool call dan menyusun jawaban final user.
+- `Summary Agent` memperbarui ringkasan percakapan + patch state setelah jawaban dikirim.
+- State internal runtime disimpan di `_csai_agent_runtime` untuk `conversation_summary`.
+- Metadata reasoning aman disimpan di `_csai_reasoning_runtime` (bukan raw CoT).
+- Reasoning mendukung `effort`, `summary`, dan continuity via `previous_response_id` saat endpoint kompatibel.
+- Jika provider menolak field reasoning tertentu, request otomatis fallback tanpa memutus flow utama.
+- `ExecStream` menyiarkan event turn/stage/tool secara kontinu agar observability rapi dan mudah diinspeksi.
+
+## 🤖 Diagram Agent Runtime
+
+```mermaid
+flowchart TD
+    A["Client: Exec / ExecWithToolCodes"] --> B{"Strategy"}
+    B -->|"legacy"| L["execLegacy (full transcript)"]
+    B -->|"compact_backend / compact_hybrid"| C["execCompact"]
+
+    C --> D["Load session messages + state"]
+    D --> E["Build compact context:
+conversation_summary + recent_conversation + external_state"]
+
+    E --> F["Identifier Agent
+select allowed_tool_codes"]
+    F --> G["Select runtime intents/tools"]
+    G --> H["Answer Agent"]
+
+    H --> I["LLM call"]
+    I --> J{"Tool calls?"}
+    J -->|"yes"| K["Execute intent handlers
+cache + guard + persist delta"]
+    K --> I
+    J -->|"no"| M["Final assistant message
++ aggregated usage"]
+
+    M --> N["Summary Agent
+update conversation_summary + state_patch"]
+    N --> O["Persist messages + session state"]
+```
+
+Alur di atas adalah default untuk strategi compact. Jika custom agent diinject dan gagal, sistem bisa fallback ke built-in agent (sesuai opsi runtime).
+
+## ⚙️ Konfigurasi Terbaru (Compact + Reasoning)
+
+```go
+package main
+
+import (
+	"context"
+	cs_ai "github.com/wirnat/cs-ai"
+	"github.com/wirnat/cs-ai/model"
+)
+
+func main() {
+	cs := cs_ai.New("OPENAI_OR_DEEPSEEK_TOKEN", model.NewOpenAICodex("gpt-5.4"), cs_ai.Options{
+		UseTool: true,
+		AgentRuntime: &cs_ai.AgentRuntimeOptions{
+			Strategy: cs_ai.ContextStrategyCompactBackend,
+			Models: cs_ai.AgentModelProfiles{
+				Summary: cs_ai.AgentModelProfile{
+					Model: "gpt-5.4-mini",
+					Reasoning: &cs_ai.ReasoningConfig{
+						Effort:  cs_ai.ReasoningEffortNone,
+						Summary: cs_ai.ReasoningSummaryOff,
+					},
+				},
+				Identifier: cs_ai.AgentModelProfile{
+					Model: "gpt-5.4-mini",
+					Reasoning: &cs_ai.ReasoningConfig{
+						Effort:  cs_ai.ReasoningEffortLow,
+						Summary: cs_ai.ReasoningSummaryOff,
+					},
+				},
+				Answer: cs_ai.AgentModelProfile{
+					Model: "gpt-5.4",
+					Reasoning: &cs_ai.ReasoningConfig{
+						Effort:  cs_ai.ReasoningEffortMedium,
+						Summary: cs_ai.ReasoningSummaryOff,
+					},
+				},
+			},
+			Builtins: cs_ai.BuiltinAgentOptions{
+				FallbackOnError: true,
+			},
+		},
+		Reasoning: &cs_ai.ReasoningConfig{
+			Effort:        cs_ai.ReasoningEffortMedium,
+			Summary:       cs_ai.ReasoningSummaryConcise,
+			Continuity:    cs_ai.ReasoningContinuityProviderManaged,
+			ExposeSummary: cs_ai.ReasoningSummaryExposureInternal,
+		},
+	})
+
+	ctx := cs_ai.WithAgentRuntimeInstructions(context.Background(), cs_ai.AgentRuntimeInstructions{
+		Shared: []string{
+			"Fokus pada data tool, jangan berasumsi tanpa evidence.",
+		},
+		Identifier: []string{
+			"Pilih tool minimum yang cukup untuk turn ini.",
+		},
+		Answer: []string{
+			"Jangan jawab final jika intent wajib belum dipanggil.",
+		},
+	})
+
+	_, _ = cs.Exec(ctx, "session-1", cs_ai.UserMessage{
+		Message:         "besok barber siapa yang available jam 10?",
+		ParticipantName: "u-1",
+	})
+}
+```
+
+Catatan penting:
+- Untuk override reasoning per eksekusi, gunakan `WithReasoningConfig(ctx, ...)`.
+- `Message.Reasoning` menyimpan metadata reasoning aman (summary/usage/continuity), bukan raw chain-of-thought.
+- `Message.AggregatedUsage` berisi total usage lintas call model dalam satu turn (termasuk loop tool).
+
+## 🌊 Streamed Turn API
+
+`cs-ai` sekarang mendukung mode orchestrated stream: backend tetap menjalankan loop tool-call internal, tetapi ke client terlihat sebagai satu stream per turn.
+
+```go
+package main
+
+import (
+	"context"
+	"os"
+
+	cs_ai "github.com/wirnat/cs-ai"
+	"github.com/wirnat/cs-ai/model"
+)
+
+func main() {
+	cs := cs_ai.New("OPENAI_OR_DEEPSEEK_TOKEN", model.NewOpenAICodex("gpt-5.4"), cs_ai.Options{
+		UseTool: true,
+		Streaming: &cs_ai.StreamingOptions{
+			Enabled:      true,
+			EmitProgress: true,
+		},
+		AgentRuntime: &cs_ai.AgentRuntimeOptions{
+			Strategy: cs_ai.ContextStrategyCompactBackend,
+			Streaming: cs_ai.AgentStreamingProfiles{
+				Summary:    {Mode: cs_ai.StageModeCompletion, EmitProgress: true},
+				Identifier: {Mode: cs_ai.StageModeCompletion, EmitProgress: true},
+				Answer:     {Mode: cs_ai.StageModeStream, EmitTextDelta: true, EmitProgress: true},
+			},
+		},
+	})
+
+	sink := cs_ai.NewJSONLStreamSink(os.Stdout)
+
+	_, _ = cs.ExecStream(context.Background(), "session-1", cs_ai.UserMessage{
+		Message:         "cek jadwal barber besok jam 10",
+		ParticipantName: "u-1",
+	}, sink)
+}
+```
+
+Event penting yang akan keluar:
+- `turn.started`
+- `agent.stage.started|completed`
+- `llm.text.delta` (hanya stage mode `stream`)
+- `tool.call.started|completed`
+- `guard.triggered`
+- `turn.escalated`
+- `turn.completed|failed`
 
 ## 📦 Storage Providers
 
@@ -2135,7 +2316,7 @@ A: Tidak ada limit hard-coded, tapi pertimbangkan performance dan memory usage u
 A: Ganti `StorageType` dan konfigurasi yang sesuai. Session data akan otomatis migrate.
 
 ### **Q: Apakah CS-AI mendukung streaming response?**
-A: Saat ini belum, tapi bisa diimplementasikan dengan custom middleware atau modifikasi response handling.
+A: Ya. Gunakan `ExecStream(...)` (atau varian `ExecStreamWithToolCodes...`) dengan `StreamSink`. Mode ini mendukung satu stream event per turn (`turn/stage/tool/text-delta`) sambil tetap menjaga loop tool-call internal backend.
 
 ## 🆘 Common Issues & Solutions
 

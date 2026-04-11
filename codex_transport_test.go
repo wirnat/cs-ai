@@ -42,9 +42,9 @@ func TestBuildRequestBodyByAPIMode_OpenAICodexResponses(t *testing.T) {
 		},
 	}
 
-	body := buildRequestBodyByAPIMode(APIModeOpenAICodexResponses, "gpt-5.4", roleMessages, functions, Options{
+	body := buildRequestBodyByAPIMode(APIModeOpenAICodexResponses, "openai-codex", "gpt-5.4", roleMessages, functions, Options{
 		UseTool: true,
-	})
+	}, requestBuildConfig{})
 
 	if got := toString(body["model"]); got != "gpt-5.4" {
 		t.Fatalf("unexpected model: %q", got)
@@ -98,6 +98,47 @@ func TestBuildRequestBodyByAPIMode_OpenAICodexResponses(t *testing.T) {
 	}
 	if additional, ok := params["additionalProperties"].(bool); !ok || additional {
 		t.Fatalf("expected additionalProperties=false in tool parameters, got: %#v", params["additionalProperties"])
+	}
+}
+
+func TestBuildRequestBodyByAPIMode_OpenAICodexResponses_WithReasoning(t *testing.T) {
+	body := buildRequestBodyByAPIMode(APIModeOpenAICodexResponses, "openai-codex", "gpt-5.4", []map[string]interface{}{
+		{"role": "system", "content": "sys"},
+		{"role": "user", "content": "halo"},
+	}, nil, Options{}, requestBuildConfig{
+		Reasoning: &ReasoningConfig{
+			Effort:  ReasoningEffortMedium,
+			Summary: ReasoningSummaryConcise,
+		},
+		PreviousResponseID: "resp_prev_123",
+	})
+
+	reasoning, ok := body["reasoning"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected reasoning payload, got %#v", body["reasoning"])
+	}
+	if toString(reasoning["effort"]) != "medium" {
+		t.Fatalf("unexpected reasoning effort: %#v", reasoning["effort"])
+	}
+	if toString(reasoning["summary"]) != "concise" {
+		t.Fatalf("unexpected reasoning summary: %#v", reasoning["summary"])
+	}
+	if toString(body["previous_response_id"]) != "resp_prev_123" {
+		t.Fatalf("unexpected previous_response_id: %#v", body["previous_response_id"])
+	}
+}
+
+func TestBuildRequestBodyByAPIMode_OpenAICodexResponses_StreamOverride(t *testing.T) {
+	streamDisabled := false
+	body := buildRequestBodyByAPIMode(APIModeOpenAICodexResponses, "openai-codex", "gpt-5.4", []map[string]interface{}{
+		{"role": "system", "content": "sys"},
+		{"role": "user", "content": "halo"},
+	}, nil, Options{}, requestBuildConfig{
+		Stream: &streamDisabled,
+	})
+
+	if stream, ok := body["stream"].(bool); !ok || stream {
+		t.Fatalf("expected stream=false, got %#v", body["stream"])
 	}
 }
 
@@ -304,6 +345,79 @@ func TestParseSSEFinalResponse_Completed(t *testing.T) {
 	}
 	if len(body) == 0 {
 		t.Fatalf("expected non-empty serialized body")
+	}
+}
+
+func TestParseSSEFinalResponseWithObserver_EmitsIncrementalEvents(t *testing.T) {
+	stream := strings.Join([]string{
+		"event: response.output_text.delta",
+		"data: {\"type\":\"response.output_text.delta\",\"delta\":\"po\"}",
+		"",
+		"event: response.output_text.delta",
+		"data: {\"type\":\"response.output_text.delta\",\"delta\":\"ng\"}",
+		"",
+		"event: response.completed",
+		"data: {\"type\":\"response.completed\",\"response\":{\"model\":\"gpt-5.4\",\"output\":[{\"type\":\"message\",\"content\":[{\"type\":\"output_text\",\"text\":\"pong\"}]}]}}",
+		"",
+	}, "\n")
+
+	events := make([]RequestStreamEvent, 0, 3)
+	result, _, err := parseSSEFinalResponseWithObserver(strings.NewReader(stream), func(event RequestStreamEvent) {
+		events = append(events, event)
+	})
+	if err != nil {
+		t.Fatalf("unexpected parse error: %v", err)
+	}
+	if result == nil {
+		t.Fatalf("expected parsed result")
+	}
+	if len(events) != 3 {
+		t.Fatalf("expected 3 stream events, got %d", len(events))
+	}
+	if events[0].EventType != "response.output_text.delta" || toString(events[0].Payload["delta"]) != "po" {
+		t.Fatalf("unexpected first event payload: %#v", events[0])
+	}
+	if events[2].EventType != "response.completed" {
+		t.Fatalf("unexpected last event type: %#v", events[2].EventType)
+	}
+}
+
+func TestParseSSEFinalResponse_ResponsesFunctionCallReconstructedFromDeltas(t *testing.T) {
+	stream := strings.Join([]string{
+		"event: response.output_item.added",
+		"data: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"id\":\"fc_123\",\"type\":\"function_call\",\"name\":\"get-provider-availability\",\"arguments\":\"\"}}",
+		"",
+		"event: response.function_call_arguments.delta",
+		"data: {\"type\":\"response.function_call_arguments.delta\",\"item_id\":\"fc_123\",\"delta\":\"{\\\"provider_name\\\":\\\"erick\\\"\"}",
+		"",
+		"event: response.function_call_arguments.delta",
+		"data: {\"type\":\"response.function_call_arguments.delta\",\"item_id\":\"fc_123\",\"delta\":\",\\\"date\\\":\\\"today\\\"}\"}",
+		"",
+		"event: response.completed",
+		"data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"object\":\"response\",\"status\":\"completed\",\"model\":\"kr/claude-sonnet-4.5\"}}",
+		"",
+	}, "\n")
+
+	result, _, err := parseSSEFinalResponse(strings.NewReader(stream))
+	if err != nil {
+		t.Fatalf("unexpected parse error: %v", err)
+	}
+	if result == nil {
+		t.Fatalf("expected parsed result")
+	}
+
+	msg, err := MessageFromResponsesMap(result)
+	if err != nil {
+		t.Fatalf("unexpected map conversion error: %v", err)
+	}
+	if len(msg.ToolCalls) != 1 {
+		t.Fatalf("expected 1 tool call, got %d", len(msg.ToolCalls))
+	}
+	if msg.ToolCalls[0].Function.Name != "get-provider-availability" {
+		t.Fatalf("unexpected tool call name: %q", msg.ToolCalls[0].Function.Name)
+	}
+	if msg.ToolCalls[0].Function.Arguments != "{\"provider_name\":\"erick\",\"date\":\"today\"}" {
+		t.Fatalf("unexpected tool call arguments: %q", msg.ToolCalls[0].Function.Arguments)
 	}
 }
 

@@ -263,6 +263,17 @@ func TestExtractBootstrapSummary_SemanticSQLOutletRowsIncludesUIDWhenAvailable(t
 	require.Equal(t, "Outlet yang bisa diakses user: Lyndford Kupang Jaya (outlet-1), Lyndford Malang (outlet-2).", summary)
 }
 
+func TestExtractBootstrapSummary_PrioritizesDisplayField(t *testing.T) {
+	summary := extractBootstrapSummary("get-service-menu", map[string]interface{}{
+		"display": "Price list ringkas: Haircut Rp 35.000 - Rp 50.000 (30 menit)",
+		"facts": map[string]interface{}{
+			"count": 3,
+		},
+	})
+
+	require.Equal(t, "Price list ringkas: Haircut Rp 35.000 - Rp 50.000 (30 menit)", summary)
+}
+
 func TestExec_FirstTurnBootstrap_StrictMode_NoPartialMutation(t *testing.T) {
 	server, _ := newBootstrapServer(t)
 	defer server.Close()

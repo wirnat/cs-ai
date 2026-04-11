@@ -18,15 +18,18 @@ const (
 const (
 	agentRuntimeStateKey          = "_csai_agent_runtime"
 	compactSummaryAssistantPrefix = "Ringkasan percakapan sejauh ini:\n"
+	compactRecentContextPrefix    = "Konteks percakapan terbaru:\n"
 )
 
 type AgentRuntimeOptions struct {
-	Strategy   ContextStrategy
-	Summary    SummaryAgent
-	Identifier IdentifierAgent
-	Answer     AnswerAgent
-	Models     AgentModelProfiles
-	Builtins   BuiltinAgentOptions
+	Strategy            ContextStrategy
+	Summary             SummaryAgent
+	Identifier          IdentifierAgent
+	Answer              AnswerAgent
+	Models              AgentModelProfiles
+	Streaming           AgentStreamingProfiles
+	Builtins            BuiltinAgentOptions
+	InstructionProvider AgentInstructionProvider
 }
 
 type BuiltinAgentOptions struct {
@@ -42,8 +45,41 @@ type AgentModelProfiles struct {
 type AgentModelProfile struct {
 	Model           string
 	ReasoningEffort string
+	Reasoning       *ReasoningConfig
 	FallbackToMain  bool
 }
+
+type AgentStage string
+
+const (
+	AgentStageSummary    AgentStage = "summary"
+	AgentStageIdentifier AgentStage = "identifier"
+	AgentStageAnswer     AgentStage = "answer"
+)
+
+type AgentRuntimeInstructions struct {
+	Shared     []string
+	Summary    []string
+	Identifier []string
+	Answer     []string
+}
+
+type AgentInstructionContext struct {
+	Stage                AgentStage
+	SessionID            string
+	LatestUserMessage    UserMessage
+	ConversationSummary  string
+	ExternalState        map[string]interface{}
+	ToolManifest         []ToolManifestEntry
+	AllowedToolCodes     []string
+	ResolvedSystemPrompt []string
+}
+
+type AgentInstructionProvider interface {
+	InstructionsForAgent(ctx context.Context, input AgentInstructionContext) []string
+}
+
+type agentRuntimeInstructionsContextKey struct{}
 
 type SummaryAgent interface {
 	Summarize(ctx context.Context, input SummaryInput) (SummaryOutput, error)
@@ -64,6 +100,7 @@ type SummaryInput struct {
 	LatestAssistantText string
 	ExternalState       map[string]interface{}
 	RecentMessages      []Message
+	RecentConversation  []Message
 	ToolEvidence        []StructuredToolTrace
 }
 
@@ -74,8 +111,12 @@ type SummaryOutput struct {
 }
 
 type ToolManifestEntry struct {
-	Code        string `json:"code"`
-	Description string `json:"description,omitempty"`
+	Code                         string                    `json:"code"`
+	Description                  string                    `json:"description,omitempty"`
+	AccessMode                   ToolAccessMode            `json:"access_mode,omitempty"`
+	RequiresExplicitConfirmation bool                      `json:"requires_explicit_confirmation,omitempty"`
+	IdempotencyScope             string                    `json:"idempotency_scope,omitempty"`
+	UserVisibleTextPolicy        ToolUserVisibleTextPolicy `json:"user_visible_text_policy,omitempty"`
 }
 
 type IdentifierInput struct {
@@ -84,6 +125,7 @@ type IdentifierInput struct {
 	ConversationSummary string
 	ExternalState       map[string]interface{}
 	ToolManifest        []ToolManifestEntry
+	RecentConversation  []Message
 }
 
 type IdentifierOutput struct {
@@ -105,6 +147,7 @@ type AnswerInput struct {
 	ExternalState        map[string]interface{}
 	ResolvedSystemPrompt []string
 	ApplyBootstrap       bool
+	RecentConversation   []Message
 }
 
 type AnswerOutput struct {
@@ -130,6 +173,26 @@ type builtInAnswerAgent struct {
 	owner *CsAI
 }
 
+func WithAgentRuntimeInstructions(ctx context.Context, instructions AgentRuntimeInstructions) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return context.WithValue(ctx, agentRuntimeInstructionsContextKey{}, instructions)
+}
+
+func (i AgentRuntimeInstructions) ForStage(stage AgentStage) []string {
+	lines := append([]string(nil), i.Shared...)
+	switch stage {
+	case AgentStageSummary:
+		lines = append(lines, i.Summary...)
+	case AgentStageIdentifier:
+		lines = append(lines, i.Identifier...)
+	case AgentStageAnswer:
+		lines = append(lines, i.Answer...)
+	}
+	return compactInstructionLines(lines)
+}
+
 func (c *CsAI) resolvedAgentRuntimeOptions() AgentRuntimeOptions {
 	resolved := AgentRuntimeOptions{
 		Strategy: ContextStrategyLegacy,
@@ -147,10 +210,16 @@ func (c *CsAI) resolvedAgentRuntimeOptions() AgentRuntimeOptions {
 		resolved.Identifier = raw.Identifier
 		resolved.Answer = raw.Answer
 		resolved.Models = raw.Models
+		resolved.Streaming = raw.Streaming
+		resolved.InstructionProvider = raw.InstructionProvider
 		if raw.Builtins.FallbackOnError {
 			resolved.Builtins.FallbackOnError = true
 		}
 	}
+
+	resolved.Streaming.Summary = normalizeStageStreamingConfig(resolved.Streaming.Summary, AgentStageSummary)
+	resolved.Streaming.Identifier = normalizeStageStreamingConfig(resolved.Streaming.Identifier, AgentStageIdentifier)
+	resolved.Streaming.Answer = normalizeStageStreamingConfig(resolved.Streaming.Answer, AgentStageAnswer)
 
 	if resolved.Summary == nil {
 		resolved.Summary = &builtInSummaryAgent{owner: c}
@@ -213,7 +282,7 @@ func stripInternalRuntimeState(raw map[string]interface{}) map[string]interface{
 	}
 	result := map[string]interface{}{}
 	for key, value := range raw {
-		if key == agentRuntimeStateKey {
+		if key == agentRuntimeStateKey || key == reasoningRuntimeStateKey {
 			continue
 		}
 		result[key] = value
@@ -230,9 +299,14 @@ func buildToolManifest(intents []Intent) []ToolManifestEntry {
 		if intent == nil {
 			continue
 		}
+		metadata := resolveToolMetadata(intent)
 		manifest = append(manifest, ToolManifestEntry{
-			Code:        strings.TrimSpace(intent.Code()),
-			Description: strings.TrimSpace(strings.Join(intent.Description(), ", ")),
+			Code:                         strings.TrimSpace(intent.Code()),
+			Description:                  strings.TrimSpace(strings.Join(intent.Description(), ", ")),
+			AccessMode:                   metadata.AccessMode,
+			RequiresExplicitConfirmation: metadata.RequiresExplicitConfirmation,
+			IdempotencyScope:             metadata.IdempotencyScope,
+			UserVisibleTextPolicy:        metadata.UserVisibleTextPolicy,
 		})
 	}
 	return manifest
@@ -257,8 +331,28 @@ func (c *CsAI) invokeAgentModel(
 	profile AgentModelProfile,
 	messages []Message,
 ) (Message, error) {
-	roleMessages := make([]map[string]interface{}, 0, len(messages))
+	expandedMessages := make([]Message, 0, len(messages)+len(c.options.DeveloperMessages))
+	var otherMsgs []Message
+
 	for _, msg := range messages {
+		if msg.Role == System {
+			expandedMessages = append(expandedMessages, msg)
+		} else {
+			otherMsgs = append(otherMsgs, msg)
+		}
+	}
+
+	for _, devMsg := range c.options.DeveloperMessages {
+		trimmed := strings.TrimSpace(devMsg)
+		if trimmed != "" {
+			expandedMessages = append(expandedMessages, Message{Role: Developer, Content: trimmed})
+		}
+	}
+
+	expandedMessages = append(expandedMessages, otherMsgs...)
+
+	roleMessages := make([]map[string]interface{}, 0, len(expandedMessages))
+	for _, msg := range expandedMessages {
 		mapped, err := msg.MessageToMap()
 		if err != nil {
 			return Message{}, err
@@ -267,7 +361,33 @@ func (c *CsAI) invokeAgentModel(
 	}
 
 	modelCandidate := c.modelForAgent(profile)
-	return c.sendWithModel(ctx, "", modelCandidate, roleMessages, nil)
+	override := resolveAgentProfileReasoning(profile)
+	return c.sendWithModelReasoning(ctx, "", modelCandidate, roleMessages, nil, override, true)
+}
+
+func resolveAgentProfileReasoning(profile AgentModelProfile) *ReasoningConfig {
+	override := profile.Reasoning
+	if override == nil && strings.TrimSpace(profile.ReasoningEffort) != "" {
+		override = &ReasoningConfig{Effort: ReasoningEffort(strings.TrimSpace(profile.ReasoningEffort))}
+	}
+	return override
+}
+
+func (c *CsAI) resolveAgentInstructions(ctx context.Context, input AgentInstructionContext) []string {
+	lines := make([]string, 0, 8)
+
+	runtime := c.resolvedAgentRuntimeOptions()
+	if runtime.InstructionProvider != nil {
+		lines = append(lines, runtime.InstructionProvider.InstructionsForAgent(ctx, input)...)
+	}
+
+	if ctx != nil {
+		if injected, ok := ctx.Value(agentRuntimeInstructionsContextKey{}).(AgentRuntimeInstructions); ok {
+			lines = append(lines, injected.ForStage(input.Stage)...)
+		}
+	}
+
+	return compactInstructionLines(lines)
 }
 
 func (c *CsAI) modelForAgent(profile AgentModelProfile) Modeler {
@@ -334,12 +454,21 @@ func (a *builtInSummaryAgent) Summarize(ctx context.Context, input SummaryInput)
 		return SummaryOutput{ConversationSummary: previous}, nil
 	}
 
-	systemPrompt := strings.Join([]string{
+	systemLines := []string{
 		"Kamu adalah summary agent internal.",
-		"Ringkas percakapan secara padat dalam Bahasa Indonesia/Bahasa Inggris sesuai dengan bahasa user.",
+		"Ringkas percakapan secara padat dengan bahasa yang sama seperti bahasa user pada percakapan terbaru.",
 		"Fokus pada tujuan user, fakta yang sudah dikonfirmasi, constraint penting, dan tindak lanjut yang masih terbuka.",
+		"Jangan hilangkan detail waktu, tanggal, angka, nama orang, dan pertanyaan klarifikasi yang masih menunggu jawaban user.",
 		"Jawaban maksimal 6 baris pendek dan tanpa markdown.",
-	}, "\n")
+	}
+	systemLines = append(systemLines, a.owner.resolveAgentInstructions(ctx, AgentInstructionContext{
+		Stage:               AgentStageSummary,
+		SessionID:           input.SessionID,
+		LatestUserMessage:   input.LatestUserMessage,
+		ConversationSummary: input.PreviousSummary,
+		ExternalState:       input.ExternalState,
+	})...)
+	systemPrompt := strings.Join(compactInstructionLines(systemLines), "\n")
 
 	stateText := stringifyCompactState(input.ExternalState)
 	evidenceText := stringifyToolEvidence(input.ToolEvidence)
@@ -351,6 +480,9 @@ func (a *builtInSummaryAgent) Summarize(ctx context.Context, input SummaryInput)
 		"State eksternal:",
 		firstNonEmptyString(stateText, "(kosong)"),
 		"",
+		"Konteks percakapan terbaru:",
+		firstNonEmptyString(stringifyRecentConversation(input.RecentConversation), "(kosong)"),
+		"",
 		"User terbaru:",
 		strings.TrimSpace(input.LatestUserMessage.Message),
 		"",
@@ -361,7 +493,14 @@ func (a *builtInSummaryAgent) Summarize(ctx context.Context, input SummaryInput)
 		firstNonEmptyString(evidenceText, "(kosong)"),
 	}, "\n")
 
-	msg, err := a.owner.invokeAgentModel(ctx, a.owner.resolvedAgentRuntimeOptions().Models.Summary, []Message{
+	runtime := a.owner.resolvedAgentRuntimeOptions()
+	stageCtx := withStageStreaming(ctx, AgentStageSummary, runtime.Streaming.Summary)
+	stageCtx = WithHTTPLogMetadata(stageCtx, HTTPLogMetadata{
+		SessionID:   strings.TrimSpace(input.SessionID),
+		Stage:       "summary",
+		RequestKind: "summary",
+	})
+	msg, err := a.owner.invokeAgentModel(stageCtx, runtime.Models.Summary, []Message{
 		{Role: System, Content: systemPrompt},
 		{Role: User, Content: userPrompt},
 	})
@@ -393,17 +532,29 @@ func (a *builtInIdentifierAgent) Identify(ctx context.Context, input IdentifierI
 	}
 
 	manifestBytes, _ := json.Marshal(input.ToolManifest)
-	systemPrompt := strings.Join([]string{
+	systemLines := []string{
 		"Kamu adalah identifier agent internal.",
 		"Tugasmu hanya memilih tool subset yang relevan untuk turn ini.",
 		"Balas HANYA JSON valid tanpa markdown.",
 		`Format: {"route":"answer_direct|run_tool_then_answer","need_tool":true|false,"allowed_tool_codes":["..."],"tool_order":["..."],"missing_info":["..."],"can_answer_direct":true|false,"confidence":0.0}`,
 		"Jangan menulis jawaban untuk user.",
-	}, "\n")
+	}
+	systemLines = append(systemLines, a.owner.resolveAgentInstructions(ctx, AgentInstructionContext{
+		Stage:               AgentStageIdentifier,
+		SessionID:           input.SessionID,
+		LatestUserMessage:   input.LatestUserMessage,
+		ConversationSummary: input.ConversationSummary,
+		ExternalState:       input.ExternalState,
+		ToolManifest:        input.ToolManifest,
+	})...)
+	systemPrompt := strings.Join(compactInstructionLines(systemLines), "\n")
 
 	userPrompt := strings.Join([]string{
 		"Ringkasan percakapan:",
 		firstNonEmptyString(strings.TrimSpace(input.ConversationSummary), "(kosong)"),
+		"",
+		"Konteks percakapan terbaru:",
+		firstNonEmptyString(stringifyRecentConversation(input.RecentConversation), "(kosong)"),
 		"",
 		"State eksternal:",
 		firstNonEmptyString(stringifyCompactState(input.ExternalState), "(kosong)"),
@@ -415,7 +566,14 @@ func (a *builtInIdentifierAgent) Identify(ctx context.Context, input IdentifierI
 		string(manifestBytes),
 	}, "\n")
 
-	msg, err := a.owner.invokeAgentModel(ctx, a.owner.resolvedAgentRuntimeOptions().Models.Identifier, []Message{
+	runtime := a.owner.resolvedAgentRuntimeOptions()
+	stageCtx := withStageStreaming(ctx, AgentStageIdentifier, runtime.Streaming.Identifier)
+	stageCtx = WithHTTPLogMetadata(stageCtx, HTTPLogMetadata{
+		SessionID:   strings.TrimSpace(input.SessionID),
+		Stage:       "identifier",
+		RequestKind: "identifier",
+	})
+	msg, err := a.owner.invokeAgentModel(stageCtx, runtime.Models.Identifier, []Message{
 		{Role: System, Content: systemPrompt},
 		{Role: User, Content: userPrompt},
 	})
@@ -449,14 +607,40 @@ func (a *builtInIdentifierAgent) Identify(ctx context.Context, input IdentifierI
 }
 
 func (a *builtInAnswerAgent) Answer(ctx context.Context, input AnswerInput) (AnswerOutput, error) {
+	resolvedSystemPrompt := append([]string(nil), input.ResolvedSystemPrompt...)
+	resolvedSystemPrompt = append(resolvedSystemPrompt,
+		"Jangan pernah menampilkan data teknis internal seperti uid, id, booking_reference, order_uid, provider_uid, service_uid, atau identifier internal lainnya kepada user.",
+		"Selalu jawab menggunakan bahasa yang sama dengan bahasa user pada pesan terbaru, tanpa membatasi hanya pada bahasa tertentu.",
+	)
+	resolvedSystemPrompt = append(resolvedSystemPrompt, a.owner.resolveAgentInstructions(ctx, AgentInstructionContext{
+		Stage:                AgentStageAnswer,
+		SessionID:            input.SessionID,
+		LatestUserMessage:    input.UserMessage,
+		ConversationSummary:  input.ConversationSummary,
+		ExternalState:        input.ExternalState,
+		AllowedToolCodes:     input.AllowedToolCodes,
+		ResolvedSystemPrompt: input.ResolvedSystemPrompt,
+	})...)
+
+	runtime := a.owner.resolvedAgentRuntimeOptions()
+	stageCtx := withStageStreaming(ctx, AgentStageAnswer, runtime.Streaming.Answer)
+	stageCtx = WithHTTPLogMetadata(stageCtx, HTTPLogMetadata{
+		SessionID:   strings.TrimSpace(input.SessionID),
+		Stage:       "answer",
+		RequestKind: "answer",
+	})
+	if override := resolveAgentProfileReasoning(runtime.Models.Answer); override != nil {
+		stageCtx = WithReasoningConfig(stageCtx, *override)
+	}
 	return a.owner.runCompactAnswerLoop(
-		ctx,
+		stageCtx,
 		input.SessionID,
 		input.UserMessage,
 		input.RuntimeIntents,
 		input.ConversationSummary,
+		input.RecentConversation,
 		input.ApplyBootstrap,
-		input.ResolvedSystemPrompt...,
+		compactInstructionLines(resolvedSystemPrompt)...,
 	)
 }
 
@@ -502,6 +686,27 @@ func stringifyToolEvidence(traces []StructuredToolTrace) string {
 	return strings.Join(lines, ", ")
 }
 
+func stringifyRecentConversation(messages []Message) string {
+	if len(messages) == 0 {
+		return ""
+	}
+
+	lines := make([]string, 0, len(messages))
+	for _, msg := range messages {
+		content := strings.TrimSpace(msg.Content)
+		if content == "" {
+			continue
+		}
+
+		role := strings.ToLower(strings.TrimSpace(string(msg.Role)))
+		if role == "" {
+			role = "unknown"
+		}
+		lines = append(lines, fmt.Sprintf("%s: %s", role, content))
+	}
+	return strings.Join(lines, "\n")
+}
+
 func decodeJSONObjectStrict(raw string, target interface{}) error {
 	trimmed := strings.TrimSpace(raw)
 	if trimmed == "" {
@@ -513,4 +718,25 @@ func decodeJSONObjectStrict(raw string, target interface{}) error {
 		trimmed = trimmed[start : end+1]
 	}
 	return json.Unmarshal([]byte(trimmed), target)
+}
+
+func compactInstructionLines(lines []string) []string {
+	if len(lines) == 0 {
+		return nil
+	}
+
+	result := make([]string, 0, len(lines))
+	seen := make(map[string]struct{}, len(lines))
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" {
+			continue
+		}
+		if _, exists := seen[trimmed]; exists {
+			continue
+		}
+		seen[trimmed] = struct{}{}
+		result = append(result, trimmed)
+	}
+	return result
 }

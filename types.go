@@ -25,6 +25,9 @@ type Options struct {
 	TopP             float32 // Kontrol probabilitas sampling LLM (0.0-1.0, default 0.7)
 	FrequencyPenalty float32 // Kontrol repetisi token (-2.0-2.0, default 0.0)
 	PresencePenalty  float32 // Kontrol repetisi topik (-2.0-2.0, default -1.5)
+	Reasoning        *ReasoningConfig
+	GroundingRepair  *GroundingRepairOptions
+	Streaming        *StreamingOptions
 
 	// === Cache & Session Options ===
 	SessionTTL time.Duration // TTL untuk session messages (default: 12 jam)
@@ -39,8 +42,17 @@ type Options struct {
 	AgentRuntime *AgentRuntimeOptions // Optional compact runtime with injectable summary/identifier/answer agents
 
 	// === Auth & Model Failover ===
-	AuthManager    AuthManager // Optional auth resolver (OAuth/profile rotation)
-	ModelFallbacks []Modeler   // Candidate fallback models in order
+	AuthManager     AuthManager // Optional auth resolver (OAuth/profile rotation)
+	ModelFallbacks  []Modeler   // Candidate fallback models in order
+	DeveloperMessages []string  // Messages injected with role=developer in every LLM request (identity override, persona lock, etc.)
+}
+
+type GroundingRepairOptions struct {
+	// Enabled mengaktifkan retry soft grounding pada answer stage ketika
+	// model memberi jawaban faktual tanpa evidence tool.
+	Enabled bool `json:"enabled,omitempty" bson:"enabled,omitempty"`
+	// MaxAttempts batas maksimum retry per turn.
+	MaxAttempts int `json:"max_attempts,omitempty" bson:"max_attempts,omitempty"`
 }
 
 type BootstrapFailurePolicy string
@@ -149,4 +161,61 @@ type AuthManager interface {
 // persist rate-limit snapshots per profile.
 type AuthRateLimitRecorder interface {
 	RecordRateLimit(ctx context.Context, provider string, profileID string, statusCode int, headers map[string]string) error
+}
+
+type ReasoningEffort string
+
+const (
+	ReasoningEffortNone    ReasoningEffort = "none"
+	ReasoningEffortMinimal ReasoningEffort = "minimal"
+	ReasoningEffortLow     ReasoningEffort = "low"
+	ReasoningEffortMedium  ReasoningEffort = "medium"
+	ReasoningEffortHigh    ReasoningEffort = "high"
+	ReasoningEffortXHigh   ReasoningEffort = "xhigh"
+)
+
+type ReasoningSummaryMode string
+
+const (
+	ReasoningSummaryOff      ReasoningSummaryMode = "off"
+	ReasoningSummaryAuto     ReasoningSummaryMode = "auto"
+	ReasoningSummaryConcise  ReasoningSummaryMode = "concise"
+	ReasoningSummaryDetailed ReasoningSummaryMode = "detailed"
+)
+
+type ReasoningContinuityMode string
+
+const (
+	ReasoningContinuityDisabled        ReasoningContinuityMode = "disabled"
+	ReasoningContinuityProviderManaged ReasoningContinuityMode = "provider_managed"
+	ReasoningContinuityBackendPass     ReasoningContinuityMode = "backend_pass_through"
+)
+
+type ReasoningSummaryExposure string
+
+const (
+	ReasoningSummaryExposureInternal ReasoningSummaryExposure = "internal_only"
+	ReasoningSummaryExposureApp      ReasoningSummaryExposure = "app_visible"
+	ReasoningSummaryExposureUser     ReasoningSummaryExposure = "user_visible"
+)
+
+type CapabilitySupport string
+
+const (
+	CapabilitySupportSupported CapabilitySupport = "supported"
+	CapabilitySupportIgnored   CapabilitySupport = "ignored"
+	CapabilitySupportUnsafe    CapabilitySupport = "unsafe"
+)
+
+type TransportCapabilities struct {
+	Reasoning           CapabilitySupport `json:"reasoning,omitempty" bson:"reasoning,omitempty"`
+	ReasoningSummary    CapabilitySupport `json:"reasoning_summary,omitempty" bson:"reasoning_summary,omitempty"`
+	ReasoningContinuity CapabilitySupport `json:"reasoning_continuity,omitempty" bson:"reasoning_continuity,omitempty"`
+}
+
+type ReasoningConfig struct {
+	Effort        ReasoningEffort          `json:"effort,omitempty" bson:"effort,omitempty"`
+	Summary       ReasoningSummaryMode     `json:"summary,omitempty" bson:"summary,omitempty"`
+	Continuity    ReasoningContinuityMode  `json:"continuity,omitempty" bson:"continuity,omitempty"`
+	ExposeSummary ReasoningSummaryExposure `json:"expose_summary,omitempty" bson:"expose_summary,omitempty"`
 }

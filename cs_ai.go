@@ -110,6 +110,91 @@ func (c *CsAI) Exec(ctx context.Context, sessionID string, userMessage UserMessa
 	return c.exec(ctx, sessionID, userMessage, c.intents, additionalSystemMessage...)
 }
 
+// ExecStream mengeksekusi satu turn dengan satu stream event kontinu ke sink.
+// Jika streaming tidak diaktifkan pada Options, method ini fallback ke Exec biasa.
+func (c *CsAI) ExecStream(
+	ctx context.Context,
+	sessionID string,
+	userMessage UserMessage,
+	sink StreamSink,
+	additionalSystemMessage ...string,
+) (Message, error) {
+	return c.execWithStream(ctx, sessionID, userMessage, c.intents, sink, additionalSystemMessage...)
+}
+
+// ExecStreamWithToolCodes mengeksekusi turn dengan subset tool runtime dan stream event kontinu ke sink.
+func (c *CsAI) ExecStreamWithToolCodes(
+	ctx context.Context,
+	sessionID string,
+	userMessage UserMessage,
+	allowedToolCodes []string,
+	sink StreamSink,
+	additionalSystemMessage ...string,
+) (Message, error) {
+	runtimeIntents := c.selectRuntimeIntents(allowedToolCodes)
+	return c.execWithStream(ctx, sessionID, userMessage, runtimeIntents, sink, additionalSystemMessage...)
+}
+
+// ExecStreamWithToolCodesAndIntents mengeksekusi turn dengan kombinasi subset tool + runtime intents dan stream event.
+func (c *CsAI) ExecStreamWithToolCodesAndIntents(
+	ctx context.Context,
+	sessionID string,
+	userMessage UserMessage,
+	allowedToolCodes []string,
+	additionalIntents []Intent,
+	sink StreamSink,
+	additionalSystemMessage ...string,
+) (Message, error) {
+	runtimeIntents := c.selectRuntimeIntents(allowedToolCodes)
+	runtimeIntents = mergeIntentsByCode(runtimeIntents, additionalIntents)
+	return c.execWithStream(ctx, sessionID, userMessage, runtimeIntents, sink, additionalSystemMessage...)
+}
+
+func (c *CsAI) execWithStream(
+	ctx context.Context,
+	sessionID string,
+	userMessage UserMessage,
+	runtimeIntents []Intent,
+	sink StreamSink,
+	additionalSystemMessage ...string,
+) (Message, error) {
+	streamRT := c.newStreamRuntime(sink)
+	if streamRT == nil {
+		return c.exec(ctx, sessionID, userMessage, runtimeIntents, additionalSystemMessage...)
+	}
+
+	ctx = withStreamRuntime(ctx, streamRT)
+	emitStreamEvent(ctx, StreamEvent{
+		Stage:   "turn",
+		Type:    "turn.started",
+		Status:  "ok",
+		Message: "turn stream dimulai",
+	})
+
+	msg, err := c.exec(ctx, sessionID, userMessage, runtimeIntents, additionalSystemMessage...)
+	if err != nil {
+		emitStreamEvent(ctx, StreamEvent{
+			Stage:   "turn",
+			Type:    "turn.failed",
+			Status:  "error",
+			ErrCode: "turn_execution_failed",
+			Message: strings.TrimSpace(err.Error()),
+			Final:   true,
+		})
+		return Message{}, err
+	}
+
+	emitStreamEvent(ctx, StreamEvent{
+		Stage:   "turn",
+		Type:    "turn.completed",
+		Status:  "ok",
+		Message: strings.TrimSpace(msg.Content),
+		Usage:   msg.AggregatedUsage,
+		Final:   true,
+	})
+	return msg, nil
+}
+
 // ExecWithToolCodes mengeksekusi pesan ke AI dengan subset tool yang diizinkan secara runtime.
 // Jika allowedToolCodes nil, semua tool aktif. Jika kosong ([]string{}), semua tool dimatikan.
 func (c *CsAI) ExecWithToolCodes(
@@ -150,7 +235,15 @@ func (c *CsAI) exec(
 	case ContextStrategyCompactBackend, ContextStrategyCompactHybrid:
 		return c.execCompact(ctx, sessionID, userMessage, runtimeIntents, additionalSystemMessage...)
 	default:
-		return c.execLegacy(ctx, sessionID, userMessage, runtimeIntents, additionalSystemMessage...)
+		stageCtx := withStageStreaming(ctx, AgentStageAnswer, runtime.Streaming.Answer)
+		emitStageEvent(stageCtx, AgentStageAnswer, "agent.stage.started", "ok", "legacy answer stage dimulai")
+		msg, err := c.execLegacy(stageCtx, sessionID, userMessage, runtimeIntents, additionalSystemMessage...)
+		if err != nil {
+			emitStageEvent(stageCtx, AgentStageAnswer, "agent.stage.completed", "error", strings.TrimSpace(err.Error()))
+			return Message{}, err
+		}
+		emitStageEvent(stageCtx, AgentStageAnswer, "agent.stage.completed", "ok", "legacy answer stage selesai")
+		return msg, nil
 	}
 }
 
@@ -268,6 +361,11 @@ func (c *CsAI) execLegacy(
 			messages.Add(aiResponse)
 		}
 
+		if aiResponse.Role != Assistant || len(aiResponse.ToolCalls) > 0 || strings.TrimSpace(aiResponse.Content) == "" {
+			aiResponse = buildToolSafetyFallbackMessage(userMessage.ParticipantName)
+			messages.Add(aiResponse)
+		}
+
 		if _, saveErr := c.SaveSessionMessages(sessionID, messages); saveErr != nil {
 			fmt.Printf("Warning: Failed to save session messages: %v\n", saveErr)
 		} // simpan percakapan
@@ -276,20 +374,37 @@ func (c *CsAI) execLegacy(
 
 	// ============================== HANDLE TOOL CALLS ==============================
 	toolCache := make(map[ToolCacheKey]Message)
-	maxLoop := 10
+	guardPolicy := effectiveGuardPolicy(ctx, c.options.Streaming)
+	maxLoop := guardPolicy.MaxHopsPerTurn
 	loopCount := 0
 	invalidToolCalls := 0
 	successfulToolCalls := 0
-	maxInvalidToolCalls := 2
+	maxInvalidToolCalls := guardPolicy.MaxToolErrorStreak
 	lastToolCallSignature := ""
 	repeatedNoProgressLoops := 0
-	maxRepeatedNoProgressLoops := 2
+	maxRepeatedNoProgressLoops := guardPolicy.MaxSameSignatureRepeat
 	consecutiveNoProgressLoops := 0
-	maxConsecutiveNoProgressLoops := 3
+	maxConsecutiveNoProgressLoops := guardPolicy.MaxNoProgressLoops
 
 	for len(aiResponse.ToolCalls) > 0 {
 		loopCount++
 		if loopCount > maxLoop {
+			emitStreamEvent(ctx, StreamEvent{
+				Stage:   "answer",
+				Type:    "guard.triggered",
+				Status:  "error",
+				ErrCode: "max_hops_per_turn",
+				Message: "batas hop per turn tercapai",
+				Hop:     loopCount,
+			})
+			if escalatedMessage, escalated := c.tryEscalateTurn(ctx, sessionID, userMessage, executionState, "max_hops_per_turn"); escalated {
+				escalatedMessage = withAggregatedUsage(escalatedMessage)
+				messages.Add(escalatedMessage)
+				if _, saveErr := c.SaveSessionMessages(sessionID, messages); saveErr != nil {
+					fmt.Printf("Warning: Failed to save session messages: %v\n", saveErr)
+				}
+				return escalatedMessage, nil
+			}
 			loopFallback := buildToolLoopLimitFallbackMessage(userMessage.ParticipantName, successfulToolCalls > 0)
 			loopFallback = withAggregatedUsage(loopFallback)
 			messages.Add(loopFallback)
@@ -305,6 +420,13 @@ func (c *CsAI) execLegacy(
 
 		// Proses semua tool calls dalam satu iterasi
 		for _, tool := range aiResponse.ToolCalls {
+			emitStreamEvent(ctx, StreamEvent{
+				Stage:    "answer",
+				Type:     "tool.call.started",
+				Status:   "ok",
+				Hop:      loopCount,
+				ToolName: strings.TrimSpace(tool.Function.Name),
+			})
 			toolDefinitionHash := executionState.ToolDefinitionHashes[tool.Function.Name]
 			cacheKey := ToolCacheKey{
 				FunctionName:       tool.Function.Name,
@@ -318,6 +440,14 @@ func (c *CsAI) execLegacy(
 					cachedResponse.ToolCallID = tool.Id
 					toolCallResponses[tool.Id] = cachedResponse
 					newMessages.Add(cachedResponse)
+					emitStreamEvent(ctx, StreamEvent{
+						Stage:    "answer",
+						Type:     "tool.call.completed",
+						Status:   "ok",
+						Hop:      loopCount,
+						ToolName: strings.TrimSpace(tool.Function.Name),
+						Message:  "tool response diambil dari cache",
+					})
 					continue
 				}
 				delete(toolCache, cacheKey)
@@ -336,9 +466,24 @@ func (c *CsAI) execLegacy(
 
 			if isInvalid {
 				invalidToolCalls++
+				emitStreamEvent(ctx, StreamEvent{
+					Stage:    "answer",
+					Type:     "tool.call.completed",
+					Status:   "error",
+					Hop:      loopCount,
+					ToolName: strings.TrimSpace(tool.Function.Name),
+					ErrCode:  "invalid_tool_call",
+				})
 			} else {
 				toolCache[cacheKey] = toolResponse
 				successfulToolCalls++
+				emitStreamEvent(ctx, StreamEvent{
+					Stage:    "answer",
+					Type:     "tool.call.completed",
+					Status:   "ok",
+					Hop:      loopCount,
+					ToolName: strings.TrimSpace(tool.Function.Name),
+				})
 			}
 			toolCallResponses[tool.Id] = toolResponse
 			newMessages.Add(toolResponse)
@@ -378,6 +523,22 @@ func (c *CsAI) execLegacy(
 		lastToolCallSignature = currentToolCallSignature
 
 		if invalidToolCalls >= maxInvalidToolCalls && successfulToolCalls == 0 {
+			emitStreamEvent(ctx, StreamEvent{
+				Stage:   "answer",
+				Type:    "guard.triggered",
+				Status:  "error",
+				ErrCode: "max_tool_error_streak",
+				Message: "tool error streak melebihi batas",
+				Hop:     loopCount,
+			})
+			if escalatedMessage, escalated := c.tryEscalateTurn(ctx, sessionID, userMessage, executionState, "max_tool_error_streak"); escalated {
+				escalatedMessage = withAggregatedUsage(escalatedMessage)
+				messages.Add(escalatedMessage)
+				if _, saveErr := c.SaveSessionMessages(sessionID, messages); saveErr != nil {
+					fmt.Printf("Warning: Failed to save session messages: %v\n", saveErr)
+				}
+				return escalatedMessage, nil
+			}
 			safeResponse := buildToolSafetyFallbackMessage(userMessage.ParticipantName)
 			safeResponse = withAggregatedUsage(safeResponse)
 			messages.Add(safeResponse)
@@ -387,6 +548,22 @@ func (c *CsAI) execLegacy(
 			return safeResponse, nil
 		}
 		if repeatedNoProgressLoops >= maxRepeatedNoProgressLoops {
+			emitStreamEvent(ctx, StreamEvent{
+				Stage:   "answer",
+				Type:    "guard.triggered",
+				Status:  "error",
+				ErrCode: "max_same_signature_repeat",
+				Message: "tool call berulang tanpa progres",
+				Hop:     loopCount,
+			})
+			if escalatedMessage, escalated := c.tryEscalateTurn(ctx, sessionID, userMessage, executionState, "max_same_signature_repeat"); escalated {
+				escalatedMessage = withAggregatedUsage(escalatedMessage)
+				messages.Add(escalatedMessage)
+				if _, saveErr := c.SaveSessionMessages(sessionID, messages); saveErr != nil {
+					fmt.Printf("Warning: Failed to save session messages: %v\n", saveErr)
+				}
+				return escalatedMessage, nil
+			}
 			safeResponse := buildToolNoProgressFallbackMessage(userMessage.ParticipantName, successfulToolCalls > 0)
 			safeResponse = withAggregatedUsage(safeResponse)
 			messages.Add(safeResponse)
@@ -396,6 +573,22 @@ func (c *CsAI) execLegacy(
 			return safeResponse, nil
 		}
 		if consecutiveNoProgressLoops >= maxConsecutiveNoProgressLoops {
+			emitStreamEvent(ctx, StreamEvent{
+				Stage:   "answer",
+				Type:    "guard.triggered",
+				Status:  "error",
+				ErrCode: "max_no_progress_loops",
+				Message: "no-progress loop melebihi batas",
+				Hop:     loopCount,
+			})
+			if escalatedMessage, escalated := c.tryEscalateTurn(ctx, sessionID, userMessage, executionState, "max_no_progress_loops"); escalated {
+				escalatedMessage = withAggregatedUsage(escalatedMessage)
+				messages.Add(escalatedMessage)
+				if _, saveErr := c.SaveSessionMessages(sessionID, messages); saveErr != nil {
+					fmt.Printf("Warning: Failed to save session messages: %v\n", saveErr)
+				}
+				return escalatedMessage, nil
+			}
 			safeResponse := buildToolNoProgressFallbackMessage(userMessage.ParticipantName, successfulToolCalls > 0)
 			safeResponse = withAggregatedUsage(safeResponse)
 			messages.Add(safeResponse)
@@ -458,6 +651,16 @@ func (c *CsAI) execLegacy(
 		if _, saveErr := c.SaveSessionMessages(sessionID, messages); saveErr != nil {
 			fmt.Printf("Warning: Failed to save session messages: %v\n", saveErr)
 		}
+	}
+
+	if aiResponse.Role != Assistant || len(aiResponse.ToolCalls) > 0 || strings.TrimSpace(aiResponse.Content) == "" {
+		safeResponse := buildToolNoProgressFallbackMessage(userMessage.ParticipantName, successfulToolCalls > 0)
+		safeResponse = withAggregatedUsage(safeResponse)
+		messages.Add(safeResponse)
+		if _, saveErr := c.SaveSessionMessages(sessionID, messages); saveErr != nil {
+			fmt.Printf("Warning: Failed to save session messages: %v\n", saveErr)
+		}
+		return safeResponse, nil
 	}
 
 	return withAggregatedUsage(aiResponse), nil
@@ -527,6 +730,7 @@ func (c *CsAI) sendWithIntentsForSession(
 		if err2 != nil {
 			return Message{}, err2
 		}
+		metadata := resolveToolMetadata(intent)
 		schemaOptions := ToolSchemaOptions{}
 		if provider, ok := intent.(ToolSchemaOptionsProvider); ok {
 			schemaOptions = provider.ToolSchemaOptions()
@@ -541,7 +745,8 @@ func (c *CsAI) sendWithIntentsForSession(
 				"description": strings.Join(intent.Description(), ", "),
 				"parameters":  param,
 			},
-			"_csai_strict": schemaOptions.Strict,
+			"_csai_strict":   schemaOptions.Strict,
+			"_csai_metadata": metadata,
 		})
 	}
 	return c.sendWithModelCandidates(ctx, sessionID, roleMessage, function)
@@ -685,6 +890,35 @@ func (c *CsAI) AddWithLogging(intents []Intent, logger *log.Logger) {
 	c.AddMiddlewareToIntents(intentCodes, loggingMiddleware)
 }
 
+// GetRegisteredToolCodes mengembalikan daftar kode tool yang benar-benar
+// terdaftar pada agent untuk subset runtime tertentu.
+// - Jika allowedToolCodes == nil, semua tool terdaftar dikembalikan.
+// - Jika allowedToolCodes kosong ([]string{}), hasilnya kosong.
+// Hasil sudah dinormalisasi lowercase, trim-space, unique, dan urutan mengikuti
+// urutan registrasi intent pada agent.
+func (c *CsAI) GetRegisteredToolCodes(allowedToolCodes []string) []string {
+	runtimeIntents := c.selectRuntimeIntents(allowedToolCodes)
+	if len(runtimeIntents) == 0 {
+		return []string{}
+	}
+
+	result := make([]string, 0, len(runtimeIntents))
+	seen := make(map[string]struct{}, len(runtimeIntents))
+	for _, intent := range runtimeIntents {
+		code := strings.ToLower(strings.TrimSpace(intent.Code()))
+		if code == "" {
+			continue
+		}
+		if _, exists := seen[code]; exists {
+			continue
+		}
+		seen[code] = struct{}{}
+		result = append(result, code)
+	}
+
+	return result
+}
+
 func (c *CsAI) containsIntent(i Intent) bool {
 	for _, intent := range c.intents {
 		if intent.Code() == i.Code() {
@@ -777,6 +1011,20 @@ func (c *CsAI) getModelMessageWithIntents(runtimeIntents []Intent, additionalSys
 		m.Add(Message{
 			Content: s,
 			Role:    System,
+		})
+	}
+
+	// Inject developer role messages (identity override, persona lock).
+	// The developer role has higher priority than system in OpenAI models,
+	// ensuring these instructions override any vendor/provider identity.
+	for _, devMsg := range c.options.DeveloperMessages {
+		trimmed := strings.TrimSpace(devMsg)
+		if trimmed == "" {
+			continue
+		}
+		m.Add(Message{
+			Content: trimmed,
+			Role:    Developer,
 		})
 	}
 
@@ -879,13 +1127,21 @@ func toolResponsesIndicateProgress(messages []Message) bool {
 		if msg.Role != Tool {
 			continue
 		}
-		status := extractToolStatus(msg.Content)
-		switch status {
-		case "", "SUCCESS", "CONFIRMATION_REQUIRED", "APPROVAL_REQUIRED":
+		if toolStatusIndicatesProgress(extractToolStatus(msg.Content)) {
 			return true
 		}
 	}
 	return false
+}
+
+func toolStatusIndicatesProgress(status string) bool {
+	normalized := strings.ToUpper(strings.TrimSpace(status))
+	switch normalized {
+	case "", "ERROR", "FAILED", "RETRY", "INVALID_TOOL_CALL":
+		return normalized == ""
+	default:
+		return true
+	}
 }
 
 func extractToolStatus(content string) string {
